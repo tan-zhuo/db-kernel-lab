@@ -1,0 +1,125 @@
+@import 'tailwindcss';
+
+/* 深色科研工具主题：低饱和背景 + 高信息密度 + 等宽数字。 */
+@theme {
+  --color-ink-950: #05070d;
+  --color-ink-900: #080b12;
+  --color-ink-850: #0b1018;
+  --color-ink-800: #0f151f;
+  --color-ink-700: #161d2b;
+  --color-ink-600: #1f2937;
+  --color-ink-500: #2b3648;
+  --color-mute-400: #6b7a91;
+  --color-mute-300: #93a4bd;
+  --color-mute-200: #c6d2e2;
+
+  --color-accent-500: #2f81f7;
+  --color-accent-400: #58a6ff;
+  --color-violet-500: #7c5cff;
+  --color-teal-500: #00b8a3;
+  --color-green-500: #2ea043;
+  --color-amber-500: #d29922;
+  --color-orange-500: #db6d28;
+  --color-red-500: #f85149;
+
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-ink-950);
+  color: var(--color-mute-200);
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    'PingFang SC',
+    'Hiragino Sans GB',
+    'Microsoft YaHei',
+    sans-serif;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-ink-600);
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-ink-500);
+}
+
+/* 数字面板统一使用等宽字体，便于对齐比较。 */
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+input[type='range'] {
+  accent-color: var(--color-accent-500);
+}
+
+.dbkl-input {
+  background: var(--color-ink-850);
+  border: 1px solid var(--color-ink-600);
+  border-radius: 6px;
+  padding: 4px 8px;
+  color: var(--color-mute-200);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  width: 100%;
+  outline: none;
+}
+.dbkl-input:focus {
+  border-color: var(--color-accent-500);
+}
+
+.dbkl-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 6px;
+  border: 1px solid var(--color-ink-600);
+  background: var(--color-ink-800);
+  color: var(--color-mute-200);
+  padding: 5px 10px;
+  font-size: 12px;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.dbkl-btn:hover:not(:disabled) {
+  background: var(--color-ink-700);
+  border-color: var(--color-ink-500);
+  color: #fff;
+}
+.dbkl-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.dbkl-btn-primary {
+  background: color-mix(in srgb, var(--color-accent-500) 22%, var(--color-ink-800));
+  border-color: color-mix(in srgb, var(--color-accent-500) 55%, transparent);
+  color: #dbeafe;
+}
+.dbkl-btn-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-accent-500) 34%, var(--color-ink-800));
+}

@@ -1,0 +1,23 @@
+{
+  "name": "db-kernel-lab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DB Kernel Lab — 数据库执行与存储内核可视化学习科研平台（纯前端）",
+  "scripts": {
+    "dev": "pnpm -C apps/web dev",
+    "build": "pnpm -C apps/web build",
+    "preview": "pnpm -C apps/web preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:e2e": "playwright test",
+    "test:all": "vitest run && playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@types/node": "^22.15.3",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  }
+}

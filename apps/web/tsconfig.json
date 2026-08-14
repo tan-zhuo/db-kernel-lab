@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": "../..",
+    "types": ["vite/client"],
+    "paths": {
+      "@dbkl/shared": ["packages/shared/src/index.ts"],
+      "@dbkl/simulation-core": ["packages/simulation-core/src/index.ts"],
+      "@dbkl/visualization": ["packages/visualization/src/index.ts"],
+      "@/*": ["apps/web/src/*"]
+    }
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"]
+}
