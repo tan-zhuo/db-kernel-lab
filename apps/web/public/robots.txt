@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://tan-zhuo.github.io/db-kernel-lab/sitemap.xml

@@ -26,7 +26,6 @@ export function SceneRoot() {
       }}
     >
       <color attach="background" args={[PALETTE.background]} />
-      <fog attach="fog" args={[PALETTE.background, 45, 140]} />
       <ambientLight intensity={0.75} />
       <hemisphereLight args={['#8ab4ff', '#0a0f1a', 0.6]} />
       <directionalLight position={[14, 26, 18]} intensity={1.1} />
@@ -69,8 +68,13 @@ function SceneContent() {
     };
   }, [layout, showBufferPool, state.buffer.frames.length]);
 
+  // 雾必须跟着场景尺度走：索引变多之后树会横向铺开很远，
+  // 固定的雾距会把整个森林都吃掉（画面全黑）。
+  const span = Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY, 40);
+
   return (
     <>
+      <fog attach="fog" args={[PALETTE.background, span * 0.9, span * 3.6]} />
       <BTreeView layout={layout} />
       {showBufferPool && <BufferPoolView layout={layout} />}
       <CameraRig layout={layout} bounds={bounds} />
@@ -119,7 +123,7 @@ function CameraRig({ layout, bounds }: { layout: TreeLayout; bounds: TreeLayout[
       const halfFov = ((perspective.fov ?? 45) * Math.PI) / 360;
       const distH = height / 2 / Math.tan(halfFov);
       const distW = width / 2 / (Math.tan(halfFov) * (perspective.aspect || 1.6));
-      const dist = Math.max(distH, distW, 12) * 1.05;
+      const dist = Math.min(Math.max(distH, distW, 12) * 1.05, 600);
       goal.current = {
         target: new THREE.Vector3(cx, cy, 0),
         position: new THREE.Vector3(cx, cy + dist * 0.22, dist),

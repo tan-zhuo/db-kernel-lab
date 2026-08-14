@@ -23,6 +23,8 @@ export function ConfigPanel() {
     <Panel
       title="引擎参数"
       subtitle="修改后需重置以重建结构"
+      collapsible
+      defaultOpen={false}
       right={
         <button
           className={`dbkl-btn ${dirty ? 'dbkl-btn-primary' : ''}`}

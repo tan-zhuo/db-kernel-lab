@@ -3,6 +3,10 @@ import { TopBar } from '@/components/TopBar';
 import { SceneOverlay } from '@/components/SceneOverlay';
 import { SceneRoot } from '@/components/scene/SceneRoot';
 import { OperationsPanel } from '@/components/panels/OperationsPanel';
+import { QueryPanel } from '@/components/panels/QueryPanel';
+import { IndexPanel } from '@/components/panels/IndexPanel';
+import { SchemaPanel } from '@/components/panels/SchemaPanel';
+import { PlanPanel } from '@/components/panels/PlanPanel';
 import { ConfigPanel } from '@/components/panels/ConfigPanel';
 import { InspectorPanel } from '@/components/panels/InspectorPanel';
 import { MetricsPanel } from '@/components/panels/MetricsPanel';
@@ -31,7 +35,10 @@ export function App() {
       <div className="flex min-h-0 flex-1">
         <aside className="flex w-[340px] shrink-0 flex-col overflow-y-auto border-r border-ink-700 bg-ink-900">
           <OperationsPanel />
+          <QueryPanel />
+          <IndexPanel />
           <ConfigPanel />
+          <SchemaPanel />
           <TutorialPanel />
         </aside>
 
@@ -41,6 +48,7 @@ export function App() {
         </main>
 
         <aside className="flex w-[340px] shrink-0 flex-col overflow-y-auto border-l border-ink-700 bg-ink-900">
+          <PlanPanel />
           <InspectorPanel />
           <MetricsPanel />
           <EventLogPanel />

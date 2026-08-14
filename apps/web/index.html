@@ -3,16 +3,211 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="DB Kernel Lab — 数据库执行与存储内核可视化学习科研平台（纯前端）" />
+    <title>DB Kernel Lab · 数据库内核可视化实验室 | B+ 树 / 二级索引 / Buffer Pool 3D 仿真</title>
+
+    <!-- ——— SEO ——————————————————————————————————————————— -->
+    <meta
+      name="description"
+      content="DB Kernel Lab 是一个纯前端的数据库执行与存储内核可视化学习科研平台：在浏览器里 3D 观察 InnoDB 风格聚簇 B+ 树的页分裂与合并、二级索引回表、Buffer Pool LRU/CLOCK 淘汰与查询优化器的代价选择，支持逐事件时间旅行回放。"
+    />
+    <meta
+      name="keywords"
+      content="数据库内核,B+树可视化,InnoDB,聚簇索引,二级索引,回表,Buffer Pool,LRU,查询优化器,执行计划,页分裂,数据库教学,3D 可视化,database internals,btree visualization"
+    />
+    <meta name="author" content="DB Kernel Lab" />
+    <meta name="robots" content="index, follow" />
+    <meta name="theme-color" content="#080b12" />
+    <link rel="canonical" href="https://tan-zhuo.github.io/db-kernel-lab/" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="DB Kernel Lab" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:title" content="DB Kernel Lab · 数据库内核可视化实验室" />
+    <meta
+      property="og:description"
+      content="在浏览器里 3D 观察 B+ 树页分裂、二级索引回表、Buffer Pool 淘汰与查询优化器选择，逐事件时间旅行回放。纯前端，无需后端。"
+    />
+    <meta property="og:url" content="https://tan-zhuo.github.io/db-kernel-lab/" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="DB Kernel Lab · 数据库内核可视化实验室" />
+    <meta
+      name="twitter:description"
+      content="纯前端的数据库存储与执行内核 3D 仿真：B+ 树、二级索引回表、Buffer Pool、查询优化器与时间旅行回放。"
+    />
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "DB Kernel Lab",
+        "alternateName": "数据库内核可视化学习科研平台",
+        "applicationCategory": "EducationalApplication",
+        "operatingSystem": "Any (Web Browser)",
+        "description": "纯前端的数据库执行与存储内核可视化平台：3D 呈现 InnoDB 风格聚簇 B+ 树的页分裂/合并、二级索引与回表、Buffer Pool 淘汰、查询优化器代价选择，并支持逐事件时间旅行回放。",
+        "inLanguage": "zh-CN",
+        "isAccessibleForFree": true,
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "CNY" },
+        "featureList": [
+          "可配置阶数的 B+ 树插入、删除、页分裂与页合并 3D 动画",
+          "二级索引与回表路径可视化",
+          "Buffer Pool LRU / CLOCK 淘汰与命中率仿真",
+          "代价优化器：全表扫描 vs 索引扫描 vs 覆盖索引",
+          "事件溯源的时间旅行回放与实验导出"
+        ]
+      }
+    </script>
+
     <!-- 内联 SVG 图标：保持零外部请求，静态部署到任何路径都不会 404。 -->
     <link
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23080b12'/%3E%3Crect x='12' y='4' width='8' height='6' rx='1.5' fill='%2300b8a3'/%3E%3Crect x='3' y='22' width='8' height='6' rx='1.5' fill='%232f81f7'/%3E%3Crect x='21' y='22' width='8' height='6' rx='1.5' fill='%232f81f7'/%3E%3Cpath d='M16 10v6M16 16H7v6M16 16h9v6' stroke='%237c5cff' stroke-width='1.6' fill='none'/%3E%3C/svg%3E"
     />
-    <title>DB Kernel Lab · 数据库内核可视化实验室</title>
+
+    <style>
+      /* 启动画面：在 JS 与 WebGL 就绪前先给出可读内容（同时也是爬虫可见的正文）。 */
+      #dbkl-boot {
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 18px;
+        background: #05070d;
+        color: #c6d2e2;
+        font-family: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+        transition: opacity 420ms ease;
+      }
+      #dbkl-boot[hidden] {
+        display: none;
+      }
+      #dbkl-boot.dbkl-boot-done {
+        opacity: 0;
+        pointer-events: none;
+      }
+      .dbkl-boot-logo {
+        width: 78px;
+        height: 78px;
+        animation: dbkl-float 2.6s ease-in-out infinite;
+      }
+      .dbkl-boot-title {
+        font-size: 21px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        color: #fff;
+      }
+      .dbkl-boot-sub {
+        max-width: 560px;
+        text-align: center;
+        font-size: 13px;
+        line-height: 1.7;
+        color: #6b7a91;
+        padding: 0 24px;
+      }
+      .dbkl-boot-bar {
+        width: 260px;
+        height: 3px;
+        border-radius: 3px;
+        background: #161d2b;
+        overflow: hidden;
+      }
+      .dbkl-boot-bar span {
+        display: block;
+        height: 100%;
+        width: 38%;
+        border-radius: 3px;
+        background: linear-gradient(90deg, #2f81f7, #7c5cff);
+        animation: dbkl-slide 1.15s ease-in-out infinite;
+      }
+      .dbkl-boot-step {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11.5px;
+        color: #2f81f7;
+        min-height: 16px;
+      }
+      .dbkl-boot-tags {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 8px;
+        max-width: 640px;
+        padding: 0 24px;
+      }
+      .dbkl-boot-tags span {
+        border: 1px solid #1f2937;
+        border-radius: 999px;
+        padding: 3px 10px;
+        font-size: 11px;
+        color: #6b7a91;
+      }
+      .dbkl-boot-note {
+        font-size: 11px;
+        color: #3d4757;
+      }
+      @keyframes dbkl-slide {
+        0% {
+          transform: translateX(-100%);
+        }
+        100% {
+          transform: translateX(360%);
+        }
+      }
+      @keyframes dbkl-float {
+        0%,
+        100% {
+          transform: translateY(0);
+        }
+        50% {
+          transform: translateY(-7px);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .dbkl-boot-logo,
+        .dbkl-boot-bar span {
+          animation: none;
+        }
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
+
+    <!-- 启动加载页：React 挂载后由 main.tsx 移除 -->
+    <div id="dbkl-boot">
+      <svg class="dbkl-boot-logo" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="12" y="3" width="8" height="6" rx="1.5" fill="#00b8a3" />
+        <rect x="2" y="23" width="8" height="6" rx="1.5" fill="#2f81f7" />
+        <rect x="12" y="23" width="8" height="6" rx="1.5" fill="#2f81f7" />
+        <rect x="22" y="23" width="8" height="6" rx="1.5" fill="#2f81f7" />
+        <path d="M16 9v7M6 23v-4h20v4M16 16v3" stroke="#7c5cff" stroke-width="1.4" fill="none" />
+      </svg>
+      <h1 class="dbkl-boot-title">DB Kernel Lab · 数据库内核可视化实验室</h1>
+      <p class="dbkl-boot-sub">
+        纯前端的数据库执行与存储内核仿真平台：在浏览器里 3D 观察 InnoDB 风格聚簇 B+ 树的页分裂与合并、
+        二级索引回表、Buffer Pool 的 LRU / CLOCK 淘汰，以及查询优化器在全表扫描与索引之间的代价权衡，
+        全部支持逐事件时间旅行回放。
+      </p>
+      <div class="dbkl-boot-bar"><span></span></div>
+      <p class="dbkl-boot-step" id="dbkl-boot-step">正在加载仿真内核…</p>
+      <div class="dbkl-boot-tags">
+        <span>B+ 树页分裂 / 合并</span>
+        <span>聚簇索引与二级索引</span>
+        <span>回表与覆盖索引</span>
+        <span>Buffer Pool LRU / CLOCK</span>
+        <span>代价优化器与执行计划</span>
+        <span>事件溯源时间旅行</span>
+        <span>Web Worker 仿真</span>
+        <span>IndexedDB 会话恢复</span>
+      </div>
+      <p class="dbkl-boot-note">无需后端 · 数据全部留在你的浏览器里</p>
+      <noscript>
+        <p class="dbkl-boot-sub" style="color: #f85149">
+          本站是一个交互式 3D 仿真实验室，需要启用 JavaScript 与 WebGL 才能运行。
+        </p>
+      </noscript>
+    </div>
+
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

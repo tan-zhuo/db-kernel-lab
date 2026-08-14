@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { Rng } from '@dbkl/shared';
 import { BTreeEngine, DEFAULT_SCHEMA } from '../src';
-import { checkInvariants, config, sortedKeys } from './helpers';
+import { checkInvariants, config, primary, sortedKeys } from './helpers';
+
+function leftmostLeafKeys(snap: ReturnType<BTreeEngine['snapshot']>): number {
+  return snap.pages[primary(snap).firstLeafId!].keys.length;
+}
 
 function freshEngine(patch = {}) {
   const cfg = config(patch);
@@ -18,7 +22,7 @@ describe('B+ 树插入', () => {
       const snap = engine.snapshot();
       checkInvariants(snap, cfg);
       expect(sortedKeys(snap)).toEqual(Array.from({ length: 200 }, (_, i) => i + 1));
-      expect(snap.height).toBeGreaterThan(1);
+      expect(primary(snap).height).toBeGreaterThan(1);
     });
 
     it(`order=${order}：随机插入 300 条后结构不变式成立`, () => {
@@ -75,8 +79,8 @@ describe('B+ 树插入', () => {
       even.engine.execute({ kind: 'insert', key: k });
       right.engine.execute({ kind: 'insert', key: k });
     }
-    const leftKeysEven = even.engine.snapshot().pages[even.engine.snapshot().firstLeafId!].keys.length;
-    const leftKeysRight = right.engine.snapshot().pages[right.engine.snapshot().firstLeafId!].keys.length;
+    const leftKeysEven = leftmostLeafKeys(even.engine.snapshot());
+    const leftKeysRight = leftmostLeafKeys(right.engine.snapshot());
     expect(leftKeysRight).toBeGreaterThan(leftKeysEven);
     checkInvariants(even.engine.snapshot(), even.cfg);
   });
@@ -109,7 +113,7 @@ describe('B+ 树查询', () => {
   it('查找路径的 DESCEND 事件数量等于树高 - 1', () => {
     const { engine } = freshEngine({ order: 4 });
     for (let k = 1; k <= 100; k++) engine.execute({ kind: 'insert', key: k });
-    const height = engine.snapshot().height;
+    const height = primary(engine.snapshot()).height;
     const descends = engine.execute({ kind: 'search', key: 55 }).filter((e) => e.type === 'DESCEND');
     expect(descends).toHaveLength(height - 1);
   });
@@ -148,7 +152,7 @@ describe('B+ 树删除', () => {
         checkInvariants(snap, cfg);
         expect(sortedKeys(snap)).toEqual([...remaining].sort((a, b) => a - b));
       }
-      expect(engine.snapshot().height).toBe(1);
+      expect(primary(engine.snapshot()).height).toBe(1);
     });
   }
 
@@ -185,10 +189,10 @@ describe('B+ 树删除', () => {
     for (let k = 1; k <= 50; k++) engine.execute({ kind: 'delete', key: k });
     const snap = engine.snapshot();
     checkInvariants(snap, cfg);
-    expect(snap.height).toBe(1);
+    expect(primary(snap).height).toBe(1);
     expect(snap.recordCount).toBe(0);
     expect(Object.keys(snap.pages)).toHaveLength(1);
-    expect(snap.pages[snap.rootId!].type).toBe('leaf');
+    expect(snap.pages[primary(snap).rootId!].type).toBe('leaf');
   });
 });
 

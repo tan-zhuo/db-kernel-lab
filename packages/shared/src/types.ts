@@ -43,6 +43,8 @@ export type EvictionPolicy = 'LRU' | 'CLOCK';
 /** 一个用户级命令的种类（用于事件分组与时间轴打点）。 */
 export type CommandKind =
   | 'create_table'
+  | 'create_index'
+  | 'drop_index'
   | 'insert'
   | 'bulk_insert'
   | 'update'
@@ -50,6 +52,7 @@ export type CommandKind =
   | 'search'
   | 'range_scan'
   | 'full_scan'
+  | 'query'
   | 'flush'
   | 'configure'
   | 'reset';

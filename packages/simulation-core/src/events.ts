@@ -1,5 +1,6 @@
 import type { CommandKind, Key, PageId, PageType, Row, TableSchema } from '@dbkl/shared';
 import type { EngineConfig } from './engine/types';
+import type { PhysicalPlan } from './query/types';
 
 /**
  * 事件协议 —— 整个平台的唯一真相来源。
@@ -40,11 +41,24 @@ export type SimulationEventBody =
   // —— 元数据 ————————————————————————————————————————————————
   | { type: 'CONFIG_SET'; config: EngineConfig }
   | { type: 'TABLE_CREATE'; schema: TableSchema }
+  | {
+      type: 'INDEX_CREATE';
+      indexId: string;
+      name: string;
+      column: string;
+      clustered: boolean;
+      unique: boolean;
+    }
+  | { type: 'INDEX_DROP'; indexId: string }
+  /** 索引统计信息刷新（模拟 ANALYZE TABLE），供代价估算使用。 */
+  | { type: 'INDEX_STATS'; indexId: string; entries: number; distinct: number; minKey: Key | null; maxKey: Key | null }
 
   // —— 页生命周期 ————————————————————————————————————————————
   | {
       type: 'PAGE_ALLOC';
       pageId: PageId;
+      /** 页归属的索引（'PRIMARY' 为聚簇索引）。 */
+      indexId: string;
       pageType: PageType;
       level: number;
       parentId: PageId | null;
@@ -53,7 +67,7 @@ export type SimulationEventBody =
     }
   | { type: 'PAGE_FREE'; pageId: PageId }
   | { type: 'PARENT_SET'; pageId: PageId; parentId: PageId | null }
-  | { type: 'ROOT_CHANGE'; oldRootId: PageId | null; newRootId: PageId; height: number }
+  | { type: 'ROOT_CHANGE'; indexId: string; oldRootId: PageId | null; newRootId: PageId; height: number }
   | { type: 'LEAF_LINK'; pageId: PageId; prev: PageId | null; next: PageId | null }
 
   // —— 索引遍历 ————————————————————————————————————————————
@@ -119,7 +133,27 @@ export type SimulationEventBody =
   | { type: 'SEARCH_BEGIN'; key: Key; mode: 'point' | 'range' | 'full' }
   | { type: 'SEARCH_RESULT'; key: Key; found: boolean; pageId: PageId | null; slot: number }
   | { type: 'SCAN_STEP'; pageId: PageId; slot: number; key: Key; row: Row | null; emitted: boolean }
-  | { type: 'SCAN_END'; rows: number; pagesTouched: number };
+  | { type: 'SCAN_END'; rows: number; pagesTouched: number }
+
+  // —— 二级索引回表 ——————————————————————————————————————
+  | {
+      type: 'LOOKUP_BACK';
+      /** 发起回表的二级索引。 */
+      indexId: string;
+      /** 二级索引叶子页与槽位。 */
+      fromPageId: PageId;
+      fromSlot: number;
+      /** 二级索引键与它指向的主键。 */
+      indexKey: Key;
+      primaryKey: Key;
+    }
+  | { type: 'LOOKUP_DONE'; fromPageId: PageId; toPageId: PageId | null; slot: number; primaryKey: Key; found: boolean }
+
+  // —— 执行计划 ————————————————————————————————————————
+  | { type: 'PLAN_READY'; plan: PhysicalPlan }
+  | { type: 'OPERATOR_OPEN'; nodeId: string; op: string; detail: string }
+  | { type: 'OPERATOR_ROW'; nodeId: string; key: Key; emitted: boolean }
+  | { type: 'OPERATOR_CLOSE'; nodeId: string; actualRows: number };
 
 export type SimulationEvent = EventMeta & SimulationEventBody;
 export type SimulationEventType = SimulationEventBody['type'];
@@ -131,6 +165,9 @@ export const EVENT_CATEGORY: Record<SimulationEventType, EventCategory> = {
   NOTE: 'command',
   CONFIG_SET: 'meta',
   TABLE_CREATE: 'meta',
+  INDEX_CREATE: 'meta',
+  INDEX_DROP: 'meta',
+  INDEX_STATS: 'meta',
   PAGE_ALLOC: 'structure',
   PAGE_FREE: 'structure',
   PARENT_SET: 'structure',
@@ -156,9 +193,15 @@ export const EVENT_CATEGORY: Record<SimulationEventType, EventCategory> = {
   SEARCH_RESULT: 'access',
   SCAN_STEP: 'access',
   SCAN_END: 'access',
+  LOOKUP_BACK: 'access',
+  LOOKUP_DONE: 'access',
+  PLAN_READY: 'plan',
+  OPERATOR_OPEN: 'plan',
+  OPERATOR_ROW: 'plan',
+  OPERATOR_CLOSE: 'plan',
 };
 
-export type EventCategory = 'command' | 'meta' | 'structure' | 'record' | 'buffer' | 'access';
+export type EventCategory = 'command' | 'meta' | 'structure' | 'record' | 'buffer' | 'access' | 'plan';
 
 /**
  * 每类事件占用的「逻辑时长」（毫秒）。
@@ -172,6 +215,9 @@ export const EVENT_DURATION: Record<SimulationEventType, number> = {
   NOTE: 60,
   CONFIG_SET: 40,
   TABLE_CREATE: 200,
+  INDEX_CREATE: 300,
+  INDEX_DROP: 200,
+  INDEX_STATS: 40,
   PAGE_ALLOC: 220,
   PAGE_FREE: 220,
   PARENT_SET: 30,
@@ -197,6 +243,12 @@ export const EVENT_DURATION: Record<SimulationEventType, number> = {
   SEARCH_RESULT: 260,
   SCAN_STEP: 90,
   SCAN_END: 120,
+  LOOKUP_BACK: 260,
+  LOOKUP_DONE: 160,
+  PLAN_READY: 400,
+  OPERATOR_OPEN: 120,
+  OPERATOR_ROW: 70,
+  OPERATOR_CLOSE: 120,
 };
 
 /** 时间轴上值得停留的「关键帧」——单步/自动播放会在这些事件上放慢。 */
@@ -207,6 +259,9 @@ export const KEYFRAME_EVENTS: ReadonlySet<SimulationEventType> = new Set<Simulat
   'ROOT_CHANGE',
   'BUFFER_EVICT',
   'SEARCH_RESULT',
+  'PLAN_READY',
+  'LOOKUP_BACK',
+  'INDEX_CREATE',
   'COMMAND_END',
 ]);
 
@@ -223,14 +278,20 @@ export function describeEvent(e: SimulationEvent): string {
       return `配置：order=${e.config.order}，buffer=${e.config.bufferPoolFrames} 帧，fill=${e.config.fillFactor}`;
     case 'TABLE_CREATE':
       return `CREATE TABLE ${e.schema.name} (PK: ${e.schema.primaryKey})`;
+    case 'INDEX_CREATE':
+      return `创建${e.clustered ? '聚簇' : '二级'}索引 ${e.name}(${e.column})`;
+    case 'INDEX_DROP':
+      return `删除索引 ${e.indexId}`;
+    case 'INDEX_STATS':
+      return `统计信息 ${e.indexId}：${e.entries} 条 / ${e.distinct} 个不同键 / [${e.minKey ?? '∅'}, ${e.maxKey ?? '∅'}]`;
     case 'PAGE_ALLOC':
-      return `分配 ${e.pageType === 'leaf' ? '叶子' : '内部'}页 #${e.pageId}（level ${e.level}）`;
+      return `分配 ${e.pageType === 'leaf' ? '叶子' : '内部'}页 #${e.pageId}（${e.indexId} level ${e.level}）`;
     case 'PAGE_FREE':
       return `回收页 #${e.pageId}`;
     case 'PARENT_SET':
       return `页 #${e.pageId} 的父页 → ${e.parentId === null ? 'ROOT' : `#${e.parentId}`}`;
     case 'ROOT_CHANGE':
-      return `根页 ${e.oldRootId === null ? '创建' : `#${e.oldRootId} →`} #${e.newRootId}，树高 ${e.height}`;
+      return `${e.indexId} 根页 ${e.oldRootId === null ? '创建' : `#${e.oldRootId} →`} #${e.newRootId}，树高 ${e.height}`;
     case 'LEAF_LINK':
       return `叶子链表 #${e.pageId}: prev=${e.prev ?? '∅'}, next=${e.next ?? '∅'}`;
     case 'DESCEND':
@@ -273,6 +334,18 @@ export function describeEvent(e: SimulationEvent): string {
       return `扫描 页 #${e.pageId} slot ${e.slot} key=${e.key}${e.emitted ? ' ✓' : ''}`;
     case 'SCAN_END':
       return `扫描结束：${e.rows} 行，触达 ${e.pagesTouched} 页`;
+    case 'LOOKUP_BACK':
+      return `回表：${e.indexId} 键 ${e.indexKey} → 主键 ${e.primaryKey}`;
+    case 'LOOKUP_DONE':
+      return e.found ? `回表命中 主键 ${e.primaryKey} @ 页 #${e.toPageId} slot ${e.slot}` : `回表未命中 主键 ${e.primaryKey}`;
+    case 'PLAN_READY':
+      return `执行计划：${e.plan.chosen}`;
+    case 'OPERATOR_OPEN':
+      return `算子 ${e.nodeId} ${e.op} 开始（${e.detail}）`;
+    case 'OPERATOR_ROW':
+      return `算子 ${e.nodeId} 产出 key=${e.key}${e.emitted ? '' : '（被过滤）'}`;
+    case 'OPERATOR_CLOSE':
+      return `算子 ${e.nodeId} 结束，实际 ${e.actualRows} 行`;
     default: {
       const never: never = e;
       return JSON.stringify(never);

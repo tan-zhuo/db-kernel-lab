@@ -1,6 +1,10 @@
 import type { EvictionPolicy, Key, Row, TableSchema } from '@dbkl/shared';
 import type { SimulationEvent } from '../events';
 import type { StructuralSnapshot } from '../state';
+import type { Predicate } from '../query/types';
+
+/** 聚簇索引（主键索引）的固定 id。 */
+export const PRIMARY_INDEX_ID = 'PRIMARY';
 
 /** 引擎能力声明：可视化层据此决定渲染哪些视图、控制面板显示哪些操作。 */
 export type EngineCapability =
@@ -47,6 +51,8 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
 /** 用户级命令：worker 的输入单元，也是会话持久化的最小单位。 */
 export type Command =
   | { kind: 'create_table'; schema: TableSchema }
+  | { kind: 'create_index'; name: string; column: string }
+  | { kind: 'drop_index'; name: string }
   | { kind: 'insert'; key: Key; row?: Row }
   | { kind: 'bulk_insert'; count: number; pattern: 'sequential' | 'random' | 'reverse'; start?: number; max?: number }
   | { kind: 'update'; key: Key; row: Row }
@@ -54,6 +60,14 @@ export type Command =
   | { kind: 'search'; key: Key }
   | { kind: 'range_scan'; from: Key; to: Key }
   | { kind: 'full_scan' }
+  | {
+      kind: 'query';
+      predicate: Predicate;
+      /** 投影列；`*` 表示整行（会触发回表）。 */
+      columns?: string[] | '*';
+      /** 'auto' 交给优化器；'none' 强制全表扫描；其它值 = 强制使用该索引。 */
+      hint?: 'auto' | 'none' | string;
+    }
   | { kind: 'flush_all' }
   | { kind: 'configure'; patch: Partial<EngineConfig> };
 

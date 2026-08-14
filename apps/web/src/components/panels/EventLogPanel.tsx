@@ -10,6 +10,7 @@ const CATEGORY_STYLE: Record<EventCategory, string> = {
   record: 'text-violet-400',
   buffer: 'text-orange-500',
   access: 'text-amber-500',
+  plan: 'text-teal-500',
 };
 
 const FILTERS: { id: 'all' | EventCategory; label: string }[] = [
@@ -18,6 +19,7 @@ const FILTERS: { id: 'all' | EventCategory; label: string }[] = [
   { id: 'record', label: '记录' },
   { id: 'buffer', label: '缓冲池' },
   { id: 'access', label: '访问' },
+  { id: 'plan', label: '计划' },
 ];
 
 /** 事件日志：游标附近的窗口，点击任意行即可把整个实验跳到那一刻。 */

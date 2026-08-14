@@ -27,6 +27,8 @@ export const PALETTE = {
   split: '#39d353',
   merge: '#ff7b72',
   lock: '#a371f7',
+  /** 回表连线：二级索引 → 聚簇索引。 */
+  lookup: '#f778ba',
   resident: '#39c5cf',
   selected: '#ffffff',
 
@@ -50,6 +52,7 @@ export const HIGHLIGHT_COLOR = {
   dirty: PALETTE.dirty,
   alloc: PALETTE.split,
   scan: PALETTE.resident,
+  lookup: PALETTE.lookup,
 } as const;
 
 export type HighlightKind = keyof typeof HIGHLIGHT_COLOR;
@@ -67,4 +70,5 @@ export const HIGHLIGHT_DECAY_MS: Record<HighlightKind, number> = {
   dirty: 600,
   alloc: 1600,
   scan: 700,
+  lookup: 2200,
 };

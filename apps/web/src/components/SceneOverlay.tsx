@@ -9,6 +9,7 @@ const LEGEND: { color: string; label: string }[] = [
   { color: PALETTE.searchPath, label: '查找路径' },
   { color: PALETTE.split, label: '分裂/新建' },
   { color: PALETTE.remove, label: '删除/淘汰' },
+  { color: PALETTE.lookup, label: '回表连线' },
 ];
 
 const SHORTCUTS = [

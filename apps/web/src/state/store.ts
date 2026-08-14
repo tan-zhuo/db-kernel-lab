@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { useEffect, useRef } from 'react';
-import type { PageId } from '@dbkl/shared';
+import type { PageId, TableSchema } from '@dbkl/shared';
 import {
   DEFAULT_ENGINE_CONFIG,
   DEFAULT_SCHEMA,
@@ -15,6 +15,7 @@ import {
 import { HighlightTracker } from '@dbkl/visualization';
 import { SimulationClient } from '@/lib/worker-client';
 import { CURRENT_SESSION_ID, createDebouncedSaver, loadSession, type SessionRecord } from '@/lib/persistence';
+import { hideBootScreen, setBootStep } from '@/lib/boot-screen';
 
 /** 单帧最多归约的事件数：保证主线程不被一次巨量回放卡住。 */
 const MAX_EVENTS_PER_FRAME = 400;
@@ -52,7 +53,7 @@ export interface SimStore {
 
   boot(): Promise<void>;
   run(command: Command): Promise<void>;
-  resetEngine(config?: EngineConfig): Promise<void>;
+  resetEngine(config?: EngineConfig, schema?: TableSchema): Promise<void>;
   goTo(index: number): void;
   step(delta: number): void;
   jumpToCommand(direction: 1 | -1): void;
@@ -101,6 +102,7 @@ export const useSimStore = create<SimStore>()((set, get) => ({
   async boot() {
     if (get().booted) return;
     set({ booted: true, busy: true });
+    setBootStep('正在读取本地实验会话…');
     const session = await loadSession(CURRENT_SESSION_ID);
     const config = session?.config ?? { ...DEFAULT_ENGINE_CONFIG };
     const commands: Command[] = session?.commands?.length
@@ -119,8 +121,14 @@ export const useSimStore = create<SimStore>()((set, get) => ({
     });
 
     try {
-      await client.init(config, commands, (events) => {
+      setBootStep(
+        session?.commands?.length
+          ? `正在重放上次实验的 ${commands.length} 条命令…`
+          : '正在初始化仿真引擎与聚簇索引…',
+      );
+      await client.init(config, commands, (events, progress) => {
         history.push(events);
+        if (progress) setBootStep(`重放命令 ${progress.done}/${progress.total}（${history.length} 个事件）`);
       });
       // 恢复的会话直接呈现最终状态，让用户回到上次离开的地方。
       const end = history.length;
@@ -135,8 +143,11 @@ export const useSimStore = create<SimStore>()((set, get) => ({
           ? `已从 IndexedDB 恢复上次实验：${commands.length} 条命令 / ${history.length} 个事件`
           : '就绪：表 users 已创建，试试左侧的插入操作',
       });
+      hideBootScreen();
     } catch (err) {
+      setBootStep('初始化失败，请刷新重试');
       set({ busy: false, error: err instanceof Error ? err.message : String(err) });
+      hideBootScreen();
     }
   },
 
@@ -177,7 +188,7 @@ export const useSimStore = create<SimStore>()((set, get) => ({
         busy: false,
         version: get().version + 1,
         status: `${last?.label ?? ''}${last?.note ? ` — ${last.note}` : ''}（+${produced} 事件${
-          autoPlay ? '' : '，事件过多已直接跳到结尾'
+          produced > AUTOPLAY_LIMIT ? '，事件过多已直接跳到结尾' : ''
         }）`,
       });
 
@@ -187,8 +198,9 @@ export const useSimStore = create<SimStore>()((set, get) => ({
     }
   },
 
-  async resetEngine(config) {
+  async resetEngine(config, schema) {
     const cfg = config ?? get().config;
+    const tableSchema = schema ?? get().state.schema ?? DEFAULT_SCHEMA;
     const history = new HistoryManager(cfg);
     set({
       busy: true,
@@ -205,7 +217,7 @@ export const useSimStore = create<SimStore>()((set, get) => ({
     });
     highlightTracker.clear();
     try {
-      const bootstrap: Command = { kind: 'create_table', schema: DEFAULT_SCHEMA };
+      const bootstrap: Command = { kind: 'create_table', schema: tableSchema };
       await client.reset(cfg, () => {});
       await client.run(bootstrap, (events) => history.push(events));
       set({
@@ -215,7 +227,7 @@ export const useSimStore = create<SimStore>()((set, get) => ({
         playhead: history.duration,
         busy: false,
         version: get().version + 1,
-        status: `已重置：order=${cfg.order}，buffer=${cfg.bufferPoolFrames} 帧，fillFactor=${cfg.fillFactor}`,
+        status: `已重置：表 ${tableSchema.name}，order=${cfg.order}，buffer=${cfg.bufferPoolFrames} 帧，fillFactor=${cfg.fillFactor}`,
       });
       saveSession(snapshotSession(get()));
     } catch (err) {

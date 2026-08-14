@@ -3,9 +3,10 @@
 > 在**纯浏览器**环境中实时观察、单步控制、对比实验数据库存储与执行内核的完整过程。
 > 无后端、无网络请求，`pnpm build` 产物可直接扔到 GitHub Pages / Vercel / Cloudflare Pages。
 
-当前实现：**Phase 0 全部 + Phase 1 的存储内核部分**——可配置阶数的聚簇 B+ 树（插入 / 点查 / 范围扫描 /
-删除 / 借位 / 合并）、页结构与槽位目录、Buffer Pool（LRU / CLOCK）、事件溯源的时间旅行、
-Web Worker 仿真、IndexedDB 会话恢复、3D 场景与视频剪辑器式时间轴。
+当前实现：**Phase 0 全部 + Phase 1 验收清单全部达成**——
+可配置阶数的聚簇 B+ 树（插入 / 点查 / 范围扫描 / 删除 / 借位 / 合并）、**二级索引与回表**、
+**代价优化器与物理执行计划**、页结构与槽位目录、Buffer Pool（LRU / CLOCK）、
+事件溯源的时间旅行、Web Worker 仿真、IndexedDB 会话恢复、3D 场景与视频剪辑器式时间轴。
 
 ---
 
@@ -17,8 +18,8 @@ pnpm dev          # http://localhost:5173
 pnpm build        # 产出 apps/web/dist（纯静态）
 pnpm preview      # 本地预览构建产物
 
-pnpm test         # 单元测试（Vitest，52 项）
-pnpm test:e2e     # 端到端 / 关键路径测试（Playwright，5 项）
+pnpm test         # 单元测试（Vitest，68 项）
+pnpm test:e2e     # 端到端 / 关键路径测试（Playwright，10 项）
 pnpm typecheck    # 全仓库类型检查
 ```
 
@@ -31,7 +32,10 @@ pnpm typecheck    # 全仓库类型检查
 2. 用底部时间轴 **单步**（← →）观察：`定位 → 插入记录 → 页满 → 分裂 → 上浮分隔键 → 根页升高`。
 3. 点 **下一次分裂** 直接跳到下一处结构变更；按 **M** 打点，Shift+拖动轨道设置循环区间反复观看。
 4. 在 3D 场景里点任意页 → 右侧「页检查器」展开页头、槽位目录与行记录；按 **F** 飞入。
-5. 换个参数（阶数 / 填充因子 / Buffer Pool 帧数 / 淘汰策略）→「应用并重置」→ 跑同一组操作，对比指标。
+5. 再跑 **⑧ 二级索引与回表**：场景里会并排出现第二棵树，查询时一条粉色弧线从二级索引飞回聚簇索引 ——
+   那就是回表。右侧「执行计划」面板同时给出算子树、估算 vs 实际行数与候选方案代价。
+6. 换成 **⑨ 覆盖索引** 对比：查询列全在索引里时 `RowIdLookup` 消失、逻辑读骤降。
+7. 换个参数（阶数 / 填充因子 / Buffer Pool 帧数 / 淘汰策略）→「应用并重置」→ 跑同一组操作，对比指标。
 
 ## 快捷键
 
@@ -51,14 +55,14 @@ db-kernel-lab/
 ├── apps/web/                       # Vite + React 19 + R3F 应用（纯客户端）
 │   └── src/
 │       ├── components/scene/       # 3D：B+ 树、连线、页标签、缓冲池、相机
-│       ├── components/panels/      # 操作、参数、页检查器、指标、事件日志、引导实验
+│       ├── components/panels/      # 操作、查询、索引、表结构、参数、执行计划、页检查器、指标、事件日志、引导实验
 │       ├── components/timeline/    # 时间轴
 │       ├── state/store.ts          # zustand：游标、播放、命令日志
 │       ├── workers/                # 仿真 Worker 入口
 │       └── lib/                    # Worker 客户端、IndexedDB、Canvas 文字贴图
 ├── packages/
 │   ├── shared/                     # 基础类型、确定性 RNG、工具函数
-│   ├── simulation-core/            # ★ 事件协议 + B+ 树引擎 + Buffer Pool + reducer + 历史管理
+│   ├── simulation-core/            # ★ 事件协议 + B+ 树引擎（多索引）+ Buffer Pool + 优化器 + reducer + 历史管理
 │   └── visualization/              # 布局算法、配色、高亮衰减（纯 TS，无 React 依赖）
 ├── e2e/                            # Playwright 关键路径测试
 └── docs/                           # 架构 / 事件协议 / Phase 验收清单
@@ -66,6 +70,10 @@ db-kernel-lab/
 
 ## 设计要点
 
+* **多棵 B+ 树共存**：聚簇索引 + 若干二级索引，二级索引叶子项是 `(索引列, 主键)`，
+  因此非覆盖查询必须回表；每次 DML 都要维护所有索引，写放大在指标里直接可见。
+* **优化器是可解释的**：统计信息 → 候选方案代价 → 物理计划全部作为事件落盘，
+  面板里能同时看到「估算行数 vs 实际行数」和「为什么没走索引」。
 * **事件驱动一切**：引擎只产生 `SimulationEvent`，UI 只消费事件归约出的 `LabState`。
   测试 `replay.test.ts` 断言「重放事件流 == 引擎内部状态」，从实现层面禁止 UI 猜状态。
 * **时间旅行是一等公民**：完整事件流 + 稀疏检查点，跳到任意时刻 = 最近检查点克隆 + 少量重放；
@@ -89,7 +97,7 @@ db-kernel-lab/
 | Phase | 内容 | 状态 |
 |---|---|---|
 | 0 | 脚手架 / 3D 场景 / 时间轴 / Worker / B+ 树插入分裂回放 | ✅ 已完成 |
-| 1 | B+ 树 CRUD、页结构、Buffer Pool、IndexedDB 恢复、指标 | ✅ 存储内核部分完成；⏳ 二级索引 + 回表、执行计划算子流 |
+| 1 | B+ 树 CRUD、页结构、Buffer Pool、二级索引与回表、执行计划、IndexedDB 恢复 | ✅ 验收项全部达成；⏳ 剩 3D 页内微观视图与算子间粒子动画 |
 | 2 | PostgreSQL 堆表对比、MVCC 版本链、ALTER TABLE | ⏳ 计划中 |
 | 3 | LSM-Tree（MemTable/SST/Compaction）、列存 | ⏳ 计划中 |
 | 4 | Redo/WAL、崩溃恢复、锁与死锁、隔离级别 | ⏳ 计划中 |
@@ -97,6 +105,16 @@ db-kernel-lab/
 | 6 | 插件系统、对比报告、录制导出 | ⏳ 计划中 |
 
 逐项验收清单见 [docs/phase-checklists.md](docs/phase-checklists.md)。
+
+## 部署与 SEO
+
+* `apps/web/index.html` 内置完整 SEO 头（description / keywords / OpenGraph / Twitter Card /
+  canonical / JSON-LD `SoftwareApplication`），`apps/web/public/` 下有 `robots.txt` 与 `sitemap.xml`。
+* 首屏是一个**静态启动画面**：在 JS 与 WebGL 就绪前就渲染出标题、简介与能力标签，
+  既是加载态（会显示「重放命令 x/y」进度），也是 SPA 的爬虫兜底正文，React 挂载后淡出移除。
+* `.github/workflows/deploy.yml` 会在 push 到 `main` 时跑 typecheck + 单测 + 构建并发布到
+  GitHub Pages（首次需在仓库 Settings → Pages → Source 选 “GitHub Actions”）。
+* 换域名时记得同步 `index.html` 的 `canonical` / `og:url`、`robots.txt` 与 `sitemap.xml` 里的三处 URL。
 
 ## 许可
 

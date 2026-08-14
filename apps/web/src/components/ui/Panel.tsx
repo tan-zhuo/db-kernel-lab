@@ -1,4 +1,5 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 
 export function Panel({
   title,
@@ -7,6 +8,8 @@ export function Panel({
   children,
   className = '',
   bodyClassName = '',
+  collapsible = false,
+  defaultOpen = true,
 }: {
   title: string;
   subtitle?: string;
@@ -14,17 +17,35 @@ export function Panel({
   children: ReactNode;
   className?: string;
   bodyClassName?: string;
+  collapsible?: boolean;
+  defaultOpen?: boolean;
 }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const showBody = !collapsible || open;
+
   return (
     <section className={`border-b border-ink-700/80 ${className}`}>
       <header className="flex items-center justify-between gap-2 px-3 py-2">
-        <div className="min-w-0">
-          <h2 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-mute-400">{title}</h2>
-          {subtitle && <p className="truncate text-[11px] text-mute-400/70">{subtitle}</p>}
-        </div>
+        <button
+          type="button"
+          className={`flex min-w-0 items-center gap-1 text-left ${collapsible ? 'cursor-pointer' : 'cursor-default'}`}
+          onClick={() => collapsible && setOpen(!open)}
+          disabled={!collapsible}
+        >
+          {collapsible &&
+            (open ? (
+              <ChevronDown size={12} className="shrink-0 text-mute-400" />
+            ) : (
+              <ChevronRight size={12} className="shrink-0 text-mute-400" />
+            ))}
+          <span className="min-w-0">
+            <span className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-mute-400">{title}</span>
+            {subtitle && <span className="block truncate text-[11px] text-mute-400/70">{subtitle}</span>}
+          </span>
+        </button>
         {right}
       </header>
-      <div className={`px-3 pb-3 ${bodyClassName}`}>{children}</div>
+      {showBody && <div className={`px-3 pb-3 ${bodyClassName}`}>{children}</div>}
     </section>
   );
 }

@@ -54,6 +54,10 @@ export function highlightsForEvent(e: SimulationEvent): Highlight[] {
       return [{ pageId: e.pageId, slot: -1, kind: 'evict' }];
     case 'PAGE_MARK_DIRTY':
       return [{ pageId: e.pageId, slot: -1, kind: 'dirty' }];
+    case 'LOOKUP_BACK':
+      return [{ pageId: e.fromPageId, slot: e.fromSlot, kind: 'lookup' }];
+    case 'LOOKUP_DONE':
+      return e.toPageId !== null ? [{ pageId: e.toPageId, slot: e.slot, kind: 'lookup' }] : [];
     case 'SEARCH_RESULT':
       return e.found && e.pageId !== null ? [{ pageId: e.pageId, slot: e.slot, kind: 'hit' }] : [];
     case 'SCAN_STEP':
@@ -128,6 +132,7 @@ function priority(kind: HighlightKind): number {
     case 'split':
     case 'merge':
     case 'evict':
+    case 'lookup':
       return 3;
     case 'insert':
     case 'delete':

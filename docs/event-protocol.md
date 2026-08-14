@@ -39,15 +39,18 @@ type SimulationEvent = EventMeta & SimulationEventBody;
 |---|---|
 | `CONFIG_SET` | 引擎参数快照；帧数变化时会重置缓冲池视图 |
 | `TABLE_CREATE` | 建表，携带完整 schema |
+| `INDEX_CREATE` | 新建一棵索引树（`clustered: true` 即聚簇索引），随后必定跟一个 `PAGE_ALLOC` + `ROOT_CHANGE` |
+| `INDEX_DROP` | 删除索引；它的页会先被逐个 `PAGE_FREE` |
+| `INDEX_STATS` | 统计信息刷新（模拟 ANALYZE）。查询前为每个候选索引发一条，是优化器**看到的**数据，可能落后于实际 |
 
 ### 页生命周期
 
 | 事件 | 语义 |
 |---|---|
-| `PAGE_ALLOC` | 新页。`init` 可携带初始 keys/children（新建根页时用来带上左子指针） |
+| `PAGE_ALLOC` | 新页，`indexId` 标明它属于哪棵索引树。`init` 可携带初始 keys/children（新建根页时用来带上左子指针） |
 | `PAGE_FREE` | 回收页；归约时同步把它从缓冲池摘除 |
 | `PARENT_SET` | 子页改挂父页（分裂/合并/借位时的重挂接） |
-| `ROOT_CHANGE` | 根页切换 + 新树高 |
+| `ROOT_CHANGE` | 某棵索引（`indexId`）的根页切换 + 新树高 |
 | `LEAF_LINK` | 叶子双向链表指针更新 |
 
 ### 索引遍历
@@ -93,12 +96,30 @@ type SimulationEvent = EventMeta & SimulationEventBody;
 | `SCAN_STEP` | 扫描到一条记录；`emitted=false` 表示被范围条件过滤掉 |
 | `SCAN_END` | 返回行数与触达页数 |
 
+### 回表
+
+| 事件 | 语义 |
+|---|---|
+| `LOOKUP_BACK` | 二级索引叶子项 (`indexKey`, `primaryKey`) 发起回表，携带来源页与槽位。**先于**聚簇索引的 `DESCEND` 序列 |
+| `LOOKUP_DONE` | 回表结束，`toPageId`/`slot` 是聚簇索引里命中的位置。reducer 用这两条事件拼出 3D 中的跨树连线 |
+
+### 执行计划
+
+| 事件 | 语义 |
+|---|---|
+| `PLAN_READY` | 优化器产出的物理计划（算子树 + 候选方案与代价）。整棵计划作为纯数据放在事件里，所以时间旅行回到这一刻就能重现当时的计划 |
+| `OPERATOR_OPEN` | 算子开始执行 |
+| `OPERATOR_ROW` | 算子产出一行；`emitted=false` 表示这行被该算子过滤掉了 |
+| `OPERATOR_CLOSE` | 算子结束，带实际行数（与计划里的 `estRows` 对比即「估算 vs 实际」） |
+
 ## 3. 顺序约定（reducer 依赖）
 
 * `PAGE_ALLOC` 必须先于任何引用该页的事件；
 * 分裂序列：`PAGE_ALLOC(new)` → `PAGE_SPLIT` → `LEAF_LINK`… → `SEPARATOR_INSERT`/`ROOT_CHANGE` → `PARENT_SET`；
 * 合并序列：`PAGE_MERGE` → `LEAF_LINK`/`PARENT_SET` → `SEPARATOR_DELETE` → `PAGE_FREE`；
-* 缓冲池序列：`PAGE_FLUSH?` → `BUFFER_EVICT` → `BUFFER_MISS` → `PAGE_READ`。
+* 缓冲池序列：`PAGE_FLUSH?` → `BUFFER_EVICT` → `BUFFER_MISS` → `PAGE_READ`；
+* 查询序列：`INDEX_STATS*` → `PLAN_READY` → `OPERATOR_OPEN*` → （扫描/回表事件与 `OPERATOR_ROW` 交织）→ `OPERATOR_CLOSE*`；
+* 回表序列：`LOOKUP_BACK` → 聚簇索引的 `PAGE_READ`/`DESCEND` → `LOOKUP_DONE`。
 
 ## 4. 新增事件的步骤
 

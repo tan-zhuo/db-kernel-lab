@@ -13,6 +13,7 @@ import { pageCapacity } from '@dbkl/simulation-core';
 import { highlightTracker, useLabState, useSimStore } from '@/state/store';
 import { PageLabels } from './PageLabels';
 import { TreeEdges } from './TreeEdges';
+import { IndexTitles, LookupArc } from './SceneAnnotations';
 
 const SLOT_HEIGHT = 0.26;
 const SLOT_GAP = 0.06;
@@ -93,13 +94,7 @@ export function BTreeView({ layout }: { layout: TreeLayout }) {
       tmpObject.updateMatrix();
       pm.setMatrixAt(i, tmpObject.matrix);
 
-      baseColor.set(
-        node.id === state.rootId
-          ? PALETTE.root
-          : node.type === 'leaf'
-            ? PALETTE.leaf
-            : PALETTE.internal,
-      );
+      baseColor.set(node.isRoot ? PALETTE.root : node.type === 'leaf' ? PALETTE.leaf : PALETTE.internal);
       if (page?.dirty) baseColor.lerp(tmpColor.set(PALETTE.dirty), 0.45);
       if (!page?.resident) baseColor.multiplyScalar(0.45);
       if (highlight) baseColor.lerp(tmpColor.set(HIGHLIGHT_COLOR[highlight[0]]), 0.25 + 0.65 * highlight[1]);
@@ -181,7 +176,13 @@ export function BTreeView({ layout }: { layout: TreeLayout }) {
       </instancedMesh>
 
       <TreeEdges layout={layout} anim={anim} />
-      {showLabels && <PageLabels layout={layout} anim={anim} />}
+      <LookupArc anim={anim} />
+      {showLabels && (
+        <>
+          <PageLabels layout={layout} anim={anim} />
+          <IndexTitles layout={layout} />
+        </>
+      )}
     </group>
   );
 }

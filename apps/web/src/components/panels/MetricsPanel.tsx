@@ -1,5 +1,5 @@
 import { formatNumber, formatPercent } from '@dbkl/shared';
-import { dirtyPageCount, hitRate } from '@dbkl/simulation-core';
+import { dirtyPageCount, hitRate, primaryIndex, secondaryIndexes } from '@dbkl/simulation-core';
 import { useLabState } from '@/state/store';
 import { Panel, Stat } from '@/components/ui/Panel';
 
@@ -10,13 +10,15 @@ export function MetricsPanel() {
   const pages = Object.keys(state.pages).length;
   const leaves = Object.values(state.pages).filter((p) => p.type === 'leaf').length;
   const rate = hitRate(m);
+  const clustered = primaryIndex(state);
+  const secondaries = secondaryIndexes(state);
   const dirty = dirtyPageCount(state);
 
   return (
     <Panel title="仿真指标" subtitle="随时间轴游标实时变化">
       <div className="grid grid-cols-3 gap-1.5">
         <Stat label="行数" value={formatNumber(state.recordCount)} tone="accent" />
-        <Stat label="树高" value={state.height} />
+        <Stat label="树高" value={clustered?.height ?? 0} hint="聚簇索引树高" />
         <Stat label="页数" value={`${pages}`} hint={`叶子 ${leaves} / 内部 ${pages - leaves}`} />
 
         <Stat label="逻辑读" value={formatNumber(m.logicalReads)} hint="每次访问页计一次" />
@@ -34,6 +36,8 @@ export function MetricsPanel() {
         <Stat label="脏页" value={`${dirty}`} tone={dirty > 0 ? 'warn' : 'good'} />
         <Stat label="刷盘" value={formatNumber(m.flushes)} />
         <Stat label="扫描行" value={formatNumber(m.scanRows)} />
+        <Stat label="回表" value={formatNumber(m.lookups)} tone={m.lookups > 0 ? 'warn' : 'default'} hint="二级索引查询回聚簇索引取整行的次数" />
+        <Stat label="二级索引" value={secondaries.length} hint={secondaries.map((s) => `${s.name}(${s.column})`).join('、') || '无'} />
       </div>
       <p className="mt-2 text-[10.5px] leading-relaxed text-mute-400/80">
         指标由事件流归约得出：把时间轴拖到任意时刻，这里显示的就是那一刻的历史值，而不是最终值。

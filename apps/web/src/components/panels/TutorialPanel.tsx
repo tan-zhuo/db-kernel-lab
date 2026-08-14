@@ -75,7 +75,52 @@ const SCENARIOS: Scenario[] = [
       { kind: 'search', key: 37 },
       { kind: 'range_scan', from: 20, to: 34 },
     ],
+  },  {
+    id: 'secondary-index',
+    title: '⑧ 二级索引与回表',
+    goal: '在 score 列上建二级索引，然后按 score 等值查询：先在二级索引树里定位，再沿粉色弧线回聚簇索引取整行。',
+    config: { order: 5, bufferPoolFrames: 10 },
+    commands: [
+      { kind: 'bulk_insert', count: 60, pattern: 'sequential', start: 1 },
+      { kind: 'create_index', name: 'idx_score', column: 'score' },
+      { kind: 'query', predicate: { kind: 'eq', column: 'score', value: (7 * 7919) % 100 } },
+    ],
   },
+  {
+    id: 'covering-index',
+    title: '⑨ 覆盖索引省掉回表',
+    goal: '同一条件，只取 (score, id) 两列：查询列全在索引里，执行计划中 RowIdLookup 消失，逻辑读大幅下降。',
+    config: { order: 5, bufferPoolFrames: 10 },
+    commands: [
+      { kind: 'bulk_insert', count: 60, pattern: 'sequential', start: 1 },
+      { kind: 'create_index', name: 'idx_score', column: 'score' },
+      { kind: 'query', predicate: { kind: 'eq', column: 'score', value: (7 * 7919) % 100 }, columns: ['score', 'id'] },
+    ],
+  },
+  {
+    id: 'optimizer',
+    title: '⑩ 优化器为什么放弃索引',
+    goal: '窄范围走索引、宽范围回落到全表扫描：对比两次执行计划里的估算行数与代价，理解回表的随机 IO 成本。',
+    config: { order: 5, bufferPoolFrames: 12 },
+    commands: [
+      { kind: 'bulk_insert', count: 120, pattern: 'sequential', start: 1 },
+      { kind: 'create_index', name: 'idx_score', column: 'score' },
+      { kind: 'query', predicate: { kind: 'range', column: 'score', from: 40, to: 42 } },
+      { kind: 'query', predicate: { kind: 'range', column: 'score', from: 0, to: 99 } },
+    ],
+  },
+  {
+    id: 'write-amplification',
+    title: '⑪ 索引带来的写放大',
+    goal: '先看没有二级索引时插入 20 行的事件数，再建两个索引后插入同样 20 行：同一条 INSERT 要维护三棵树。',
+    config: { order: 5, bufferPoolFrames: 12 },
+    commands: [
+      { kind: 'bulk_insert', count: 20, pattern: 'sequential', start: 1 },
+      { kind: 'create_index', name: 'idx_score', column: 'score' },
+      { kind: 'bulk_insert', count: 20, pattern: 'sequential', start: 100 },
+    ],
+  },
+
 ];
 
 export function TutorialPanel() {

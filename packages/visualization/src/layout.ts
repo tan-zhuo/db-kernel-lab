@@ -1,5 +1,5 @@
 import type { PageId, PageType } from '@dbkl/shared';
-import { pageCapacity, type LabState } from '@dbkl/simulation-core';
+import { orderedIndexes, pageCapacity, type IndexState, type LabState } from '@dbkl/simulation-core';
 
 export interface LayoutOptions {
   /** 单个槽位的宽度。 */
@@ -13,6 +13,8 @@ export interface LayoutOptions {
   siblingGap: number;
   /** 层与层之间的垂直距离。 */
   levelGap: number;
+  /** 两棵索引树之间的水平间距。 */
+  indexGap: number;
 }
 
 export const DEFAULT_LAYOUT: LayoutOptions = {
@@ -22,13 +24,17 @@ export const DEFAULT_LAYOUT: LayoutOptions = {
   padX: 0.22,
   siblingGap: 1.1,
   levelGap: 3.4,
+  indexGap: 7,
 };
 
 export interface LayoutNode {
   id: PageId;
+  indexId: string;
   type: PageType;
   level: number;
   parentId: PageId | null;
+  /** 是否是所属索引的根页。 */
+  isRoot: boolean;
   /** 页盒子中心坐标。 */
   x: number;
   y: number;
@@ -56,10 +62,24 @@ export interface LayoutEdge {
   fromSlot: number;
 }
 
+/** 一棵索引树在场景中的占位，用于画标题与分区。 */
+export interface LayoutGroup {
+  indexId: string;
+  name: string;
+  column: string;
+  clustered: boolean;
+  minX: number;
+  maxX: number;
+  centerX: number;
+  topY: number;
+  pages: number;
+}
+
 export interface TreeLayout {
   nodes: LayoutNode[];
   byId: Map<PageId, LayoutNode>;
   edges: LayoutEdge[];
+  groups: LayoutGroup[];
   levels: number;
   bounds: { minX: number; maxX: number; minY: number; maxY: number };
   /** 槽位总数（InstancedMesh 需要预分配）。 */
@@ -67,134 +87,86 @@ export interface TreeLayout {
 }
 
 /**
- * B+ 树 3D 布局。
+ * 多索引 B+ 树森林布局。
  *
- * 叶子层按叶子链表 / 深度优先顺序水平铺开，内部页居中于其子页跨度之上；
- * 同层做一次左到右的推挤消重叠，再整体居中到原点。
+ * 每棵索引树独立布局后横向并排（聚簇索引在最左），这样「二级索引 → 回表」
+ * 就能画成一条跨树的连线。单棵树内部：叶子层水平铺开、内部页居中于子页跨度之上、
+ * 同层做一次左到右的推挤消重叠。
  *
  * 复杂度 O(n log n)（每层一次排序），n 为页数。
  */
 export function layoutTree(state: LabState, options: Partial<LayoutOptions> = {}): TreeLayout {
   const opt = { ...DEFAULT_LAYOUT, ...options };
   const capacity = pageCapacity(state.config);
+  const width = capacity * opt.slotWidth + opt.padX * 2;
+
   const nodes: LayoutNode[] = [];
   const byId = new Map<PageId, LayoutNode>();
-  const edges: LayoutEdge[] = [];
+  const groups: LayoutGroup[] = [];
+  const placed = new Set<PageId>();
 
-  const widthOf = (): number => capacity * opt.slotWidth + opt.padX * 2;
-
-  // 1) 深度优先确定左右次序（比依赖叶子链表更稳健：分裂中间态也能画）。
-  const order: PageId[] = [];
-  const visit = (id: PageId, guard: Set<PageId>): void => {
-    if (guard.has(id)) return;
-    guard.add(id);
-    const p = state.pages[id];
-    if (!p) return;
-    if (p.type === 'internal') {
-      for (const c of p.children) visit(c, guard);
-    }
-    order.push(id);
-  };
-  const guard = new Set<PageId>();
-  if (state.rootId !== null) visit(state.rootId, guard);
-  // 尚未挂上父页的新页（分裂动画的中间帧）也要渲染出来。
-  for (const key in state.pages) {
-    const id = state.pages[key].id;
-    if (!guard.has(id)) order.push(id);
-  }
-
-  // 2) 叶子层等距排布。
   let cursorX = 0;
-  const leafOrder = order.filter((id) => state.pages[id]?.type === 'leaf');
-  for (const id of leafOrder) {
-    const p = state.pages[id];
-    const w = widthOf();
-    const node: LayoutNode = {
-      id,
-      type: p.type,
-      level: p.level,
-      parentId: p.parentId,
-      x: cursorX + w / 2,
-      y: 0,
-      z: 0,
-      width: w,
-      height: opt.pageHeight,
-      depth: opt.pageDepth,
-      capacity,
-      used: p.keys.length,
-      fill: p.keys.length / capacity,
-      index: 0,
-      rank: 0,
-    };
+  let maxLevelAll = 0;
+
+  for (const ix of orderedIndexes(state)) {
+    const start = cursorX;
+    const created = layoutIndex(state, ix, opt, width, capacity, cursorX, nodes, byId, placed);
+    if (created.count === 0) continue;
+    groups.push({
+      indexId: ix.id,
+      name: ix.name,
+      column: ix.column,
+      clustered: ix.clustered,
+      minX: start,
+      maxX: created.maxX,
+      centerX: (start + created.maxX) / 2,
+      topY: created.topY,
+      pages: created.count,
+    });
+    maxLevelAll = Math.max(maxLevelAll, created.maxLevel);
+    cursorX = created.maxX + opt.indexGap;
+  }
+
+  // 尚未挂到任何索引上的页（分裂动画中间态）也要渲染出来。
+  for (const key in state.pages) {
+    const p = state.pages[key];
+    if (placed.has(p.id)) continue;
+    const node = makeNode(p.id, state, opt, width, capacity, cursorX + width / 2, p.level * opt.levelGap, false);
     nodes.push(node);
-    byId.set(id, node);
-    cursorX += w + opt.siblingGap;
+    byId.set(p.id, node);
+    placed.add(p.id);
+    cursorX += width + opt.siblingGap;
   }
 
-  // 3) 自底向上放置内部页：居中于子页跨度。
-  const maxLevel = Object.values(state.pages).reduce((mx, p) => Math.max(mx, p.level), 0);
-  for (let level = 1; level <= maxLevel; level++) {
-    const idsAtLevel = order.filter((id) => state.pages[id]?.level === level);
-    for (const id of idsAtLevel) {
-      const p = state.pages[id];
-      const childNodes = p.children.map((c) => byId.get(c)).filter((n): n is LayoutNode => !!n);
-      const w = widthOf();
-      const x =
-        childNodes.length > 0
-          ? (Math.min(...childNodes.map((c) => c.x)) + Math.max(...childNodes.map((c) => c.x))) / 2
-          : cursorX + w / 2;
-      const node: LayoutNode = {
-        id,
-        type: p.type,
-        level,
-        parentId: p.parentId,
-        x,
-        y: level * opt.levelGap,
-        z: 0,
-        width: w,
-        height: opt.pageHeight,
-        depth: opt.pageDepth,
-        capacity,
-        used: p.keys.length,
-        fill: p.keys.length / capacity,
-        index: 0,
-        rank: 0,
-      };
-      nodes.push(node);
-      byId.set(id, node);
-    }
-    // 同层消重叠（保持相对次序）。
-    const levelNodes = nodes.filter((n) => n.level === level).sort((a, b) => a.x - b.x);
-    for (let i = 1; i < levelNodes.length; i++) {
-      const prev = levelNodes[i - 1];
-      const cur = levelNodes[i];
-      const minX = prev.x + prev.width / 2 + opt.siblingGap + cur.width / 2;
-      if (cur.x < minX) cur.x = minX;
-    }
-  }
-
-  // 4) 整体居中 + 记录序号。
+  // 整体居中 + 序号
   const xs = nodes.map((n) => n.x);
   const centerX = xs.length ? (Math.min(...xs) + Math.max(...xs)) / 2 : 0;
-  const perLevelRank = new Map<number, number>();
   let minX = Infinity;
   let maxX = -Infinity;
   let minY = Infinity;
   let maxY = -Infinity;
+  const perLevelRank = new Map<string, number>();
   nodes.sort((a, b) => (a.level === b.level ? a.x - b.x : a.level - b.level));
   nodes.forEach((n, i) => {
     n.x -= centerX;
     n.index = i;
-    const rank = perLevelRank.get(n.level) ?? 0;
+    const rankKey = `${n.indexId}:${n.level}`;
+    const rank = perLevelRank.get(rankKey) ?? 0;
     n.rank = rank;
-    perLevelRank.set(n.level, rank + 1);
+    perLevelRank.set(rankKey, rank + 1);
     minX = Math.min(minX, n.x - n.width / 2);
     maxX = Math.max(maxX, n.x + n.width / 2);
     minY = Math.min(minY, n.y);
     maxY = Math.max(maxY, n.y);
   });
+  for (const g of groups) {
+    g.minX -= centerX;
+    g.maxX -= centerX;
+    g.centerX -= centerX;
+  }
 
-  // 5) 边：父子指针 + 叶子链表。
+  // 边：父子指针 + 叶子链表
+  const edges: LayoutEdge[] = [];
   for (const n of nodes) {
     const p = state.pages[n.id];
     if (!p) continue;
@@ -211,7 +183,8 @@ export function layoutTree(state: LabState, options: Partial<LayoutOptions> = {}
     nodes,
     byId,
     edges,
-    levels: maxLevel + 1,
+    groups,
+    levels: maxLevelAll + 1,
     bounds: {
       minX: Number.isFinite(minX) ? minX : -1,
       maxX: Number.isFinite(maxX) ? maxX : 1,
@@ -219,6 +192,110 @@ export function layoutTree(state: LabState, options: Partial<LayoutOptions> = {}
       maxY: Number.isFinite(maxY) ? maxY : 1,
     },
     totalSlots: nodes.length * capacity,
+  };
+}
+
+function layoutIndex(
+  state: LabState,
+  ix: IndexState,
+  opt: LayoutOptions,
+  width: number,
+  capacity: number,
+  startX: number,
+  nodes: LayoutNode[],
+  byId: Map<PageId, LayoutNode>,
+  placed: Set<PageId>,
+): { count: number; maxX: number; maxLevel: number; topY: number } {
+  if (ix.rootId === null || !state.pages[ix.rootId]) return { count: 0, maxX: startX, maxLevel: 0, topY: 0 };
+
+  // 深度优先确定左右次序（比依赖叶子链表更稳健：分裂中间态也能画）
+  const order: PageId[] = [];
+  const guard = new Set<PageId>();
+  const visit = (id: PageId): void => {
+    if (guard.has(id)) return;
+    guard.add(id);
+    const p = state.pages[id];
+    if (!p) return;
+    if (p.type === 'internal') for (const c of p.children) visit(c);
+    order.push(id);
+  };
+  visit(ix.rootId);
+
+  let cursorX = startX;
+  const created: LayoutNode[] = [];
+
+  // 叶子层等距排布
+  for (const id of order) {
+    const p = state.pages[id];
+    if (!p || p.type !== 'leaf') continue;
+    const node = makeNode(id, state, opt, width, capacity, cursorX + width / 2, 0, id === ix.rootId);
+    created.push(node);
+    nodes.push(node);
+    byId.set(id, node);
+    placed.add(id);
+    cursorX += width + opt.siblingGap;
+  }
+
+  // 自底向上放置内部页：居中于子页跨度
+  const maxLevel = order.reduce((mx, id) => Math.max(mx, state.pages[id]?.level ?? 0), 0);
+  for (let level = 1; level <= maxLevel; level++) {
+    for (const id of order) {
+      const p = state.pages[id];
+      if (!p || p.level !== level) continue;
+      const childNodes = p.children.map((c) => byId.get(c)).filter((n): n is LayoutNode => !!n);
+      const x =
+        childNodes.length > 0
+          ? (Math.min(...childNodes.map((c) => c.x)) + Math.max(...childNodes.map((c) => c.x))) / 2
+          : cursorX + width / 2;
+      const node = makeNode(id, state, opt, width, capacity, x, level * opt.levelGap, id === ix.rootId);
+      created.push(node);
+      nodes.push(node);
+      byId.set(id, node);
+      placed.add(id);
+    }
+    // 同层消重叠（保持相对次序）
+    const levelNodes = created.filter((n) => n.level === level).sort((a, b) => a.x - b.x);
+    for (let i = 1; i < levelNodes.length; i++) {
+      const prev = levelNodes[i - 1];
+      const cur = levelNodes[i];
+      const min = prev.x + prev.width / 2 + opt.siblingGap + cur.width / 2;
+      if (cur.x < min) cur.x = min;
+    }
+  }
+
+  const maxX = Math.max(...created.map((n) => n.x + n.width / 2));
+  return { count: created.length, maxX, maxLevel, topY: maxLevel * opt.levelGap };
+}
+
+function makeNode(
+  id: PageId,
+  state: LabState,
+  opt: LayoutOptions,
+  width: number,
+  capacity: number,
+  x: number,
+  y: number,
+  isRoot: boolean,
+): LayoutNode {
+  const p = state.pages[id];
+  return {
+    id,
+    indexId: p.indexId,
+    type: p.type,
+    level: p.level,
+    parentId: p.parentId,
+    isRoot,
+    x,
+    y,
+    z: 0,
+    width,
+    height: opt.pageHeight,
+    depth: opt.pageDepth,
+    capacity,
+    used: p.keys.length,
+    fill: p.keys.length / capacity,
+    index: 0,
+    rank: 0,
   };
 }
 

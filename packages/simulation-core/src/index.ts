@@ -6,3 +6,5 @@ export * from './engine/types';
 export * from './engine/buffer-pool';
 export * from './engine/btree-engine';
 export * from './engine/registry';
+export * from './query/types';
+export * from './query/planner';
