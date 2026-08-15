@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
-import { BookOpen, ChevronDown, Download, Eye, Fullscreen, Loader2, RotateCcw, Type } from 'lucide-react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { BookOpen, ChevronDown, Download, Eye, Fullscreen, GitBranch, Globe, Info, Loader2, RotateCcw, Type } from 'lucide-react';
 import { useCapability, useSimStore } from '@/state/store';
 import { captureScreenshot } from '@/components/scene/SceneRoot';
 import { ThemePicker } from '@/components/ThemePicker';
 import { EnginePicker } from '@/components/EnginePicker';
+import { AUTHOR, PROJECT_LINKS } from '@/content/links';
 
 /**
  * 顶栏。
@@ -11,7 +12,7 @@ import { EnginePicker } from '@/components/EnginePicker';
  * 排布按「多久用一次」分三组，而不是把按钮平铺出去：
  *  左：身份 + **引擎选择**（全局模式开关）+ 当前状态；
  *  中：视图开关（看画面时经常按，直接给按钮）；
- *  右：原理 / 导出 / 主题 / 重置（低频，导出三项收进一个下拉）。
+ *  右：原理 / 导出 / 主题 / 关于 / 重置（低频，多项操作各收进一个下拉）。
  */
 export function TopBar() {
   const status = useSimStore((s) => s.status);
@@ -67,6 +68,7 @@ export function TopBar() {
       </button>
       <ExportMenu />
       <ThemePicker />
+      <AboutMenu />
       <button
         className="dbkl-btn"
         title={`重置实验（当前引擎：${engineName || '加载中'}）`}
@@ -79,6 +81,66 @@ export function TopBar() {
         <RotateCcw size={13} />
       </button>
     </header>
+  );
+}
+
+/** 项目与作者的外部链接。收进下拉，免得刚清干净的顶栏又被两个图标塞回去。 */
+function AboutMenu() {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    window.addEventListener('mousedown', onDown);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('mousedown', onDown);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const link = (icon: ReactNode, label: string, hint: string, href: string, testId: string) => (
+    <a
+      data-testid={testId}
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="flex items-start gap-2 rounded px-1.5 py-1.5 hover:bg-ink-800"
+      onClick={() => setOpen(false)}
+    >
+      <span className="mt-[2px] shrink-0 text-mute-400">{icon}</span>
+      <span className="min-w-0">
+        <span className="block text-[12px] text-mute-200">{label}</span>
+        <span className="num block truncate text-[10.5px] text-mute-400">{hint}</span>
+      </span>
+    </a>
+  );
+
+  return (
+    <div className="relative" ref={ref}>
+      <button className="dbkl-btn" data-testid="about-menu" title="关于本项目" onClick={() => setOpen(!open)}>
+        <Info size={13} />
+      </button>
+      {open && (
+        <div
+          className="absolute right-0 top-[calc(100%+6px)] z-50 w-[248px] rounded-md border border-ink-600 bg-ink-850 p-1.5 shadow-xl shadow-black/40"
+          data-testid="about-panel"
+        >
+          <div className="px-1.5 pb-1 text-[10px] uppercase tracking-[0.14em] text-mute-400">关于</div>
+          {link(<GitBranch size={13} />, '开源地址', 'tan-zhuo/db-kernel-lab', PROJECT_LINKS.repo, 'link-repo')}
+          {link(<Globe size={13} />, `作者博客 · ${AUTHOR}`, 'tanzhuo.xyz', PROJECT_LINKS.blog, 'link-blog')}
+          <p className="px-1.5 pt-1.5 text-[10px] leading-relaxed text-mute-400/80">
+            纯前端仿真，数据全部留在你的浏览器里。欢迎提 issue 与 PR。
+          </p>
+        </div>
+      )}
+    </div>
   );
 }
 

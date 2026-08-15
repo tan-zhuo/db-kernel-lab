@@ -3,6 +3,10 @@
 > 在**纯浏览器**环境中实时观察、单步控制、对比实验数据库存储与执行内核的完整过程。
 > 无后端、无网络请求，`pnpm build` 产物可直接扔到 GitHub Pages / Vercel / Cloudflare Pages。
 
+**[在线体验](https://tan-zhuo.github.io/db-kernel-lab/)** ·
+**[开源地址](https://github.com/tan-zhuo/db-kernel-lab)** ·
+**[作者博客 tanzhuo.xyz](https://tanzhuo.xyz)**
+
 当前实现：**Phase 0–3**，三种存储引擎可一键切换、并排对比：
 
 | 引擎 | 物理模型 | 你能亲眼看到的东西 |
@@ -232,6 +236,21 @@ db-kernel-lab/
 * `.github/workflows/deploy.yml` 会在 push 到 `main` 时跑 typecheck + 单测 + 构建并发布到
   GitHub Pages（首次需在仓库 Settings → Pages → Source 选 “GitHub Actions”）。
 * 换域名时记得同步 `index.html` 的 `canonical` / `og:url`、`robots.txt` 与 `sitemap.xml` 里的三处 URL。
+
+## 作者与链接
+
+| | |
+|---|---|
+| 作者 | **tanzhuo** |
+| 博客 | <https://tanzhuo.xyz> |
+| 开源地址 | <https://github.com/tan-zhuo/db-kernel-lab> |
+| 在线体验 | <https://tan-zhuo.github.io/db-kernel-lab/> |
+
+站内也能找到这两个链接：顶栏右侧的 **ⓘ 关于** 按钮，以及「原理」讲解页左下角。
+应用里的链接统一来自 `apps/web/src/content/links.ts`，换域名只改那一处。
+
+欢迎提 issue 与 PR —— 尤其是「这里和真实实现不一样」这类指正，
+它们会直接进 `docs/architecture.md` 的差异清单。
 
 ## 许可
 

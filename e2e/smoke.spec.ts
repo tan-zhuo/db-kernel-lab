@@ -250,3 +250,26 @@ test('顶栏：引擎下拉与导出菜单都是按需展开的', async ({ page 
   await expect(page.getByTestId('export-state')).toBeVisible();
   await expect(page.getByTestId('export-shot')).toBeVisible();
 });
+
+test('关于：开源地址与作者博客在站内可达', async ({ page }) => {
+  await page.goto('/');
+  await waitForReady(page);
+
+  await page.getByTestId('about-menu').click();
+  await expect(page.getByTestId('about-panel')).toBeVisible();
+  await expect(page.getByTestId('link-repo')).toHaveAttribute('href', 'https://github.com/tan-zhuo/db-kernel-lab');
+  await expect(page.getByTestId('link-blog')).toHaveAttribute('href', 'https://tanzhuo.xyz');
+  // 外链一律新开标签页，别把正在跑的实验冲掉
+  await expect(page.getByTestId('link-repo')).toHaveAttribute('target', '_blank');
+  await expect(page.getByTestId('link-blog')).toHaveAttribute('target', '_blank');
+
+  // 讲解页左下角也留了同一组链接
+  await page.keyboard.press('Escape');
+  await page.getByTestId('open-guide').click();
+  const guide = page.getByTestId('guide-overlay');
+  await expect(guide.getByRole('link', { name: '开源地址' })).toHaveAttribute(
+    'href',
+    'https://github.com/tan-zhuo/db-kernel-lab',
+  );
+  await expect(guide.getByRole('link', { name: /tanzhuo\.xyz/ })).toBeVisible();
+});

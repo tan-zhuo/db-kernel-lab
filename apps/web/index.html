@@ -14,7 +14,8 @@
       name="keywords"
       content="数据库内核,B+树可视化,InnoDB,聚簇索引,二级索引,回表,Buffer Pool,LRU,查询优化器,执行计划,页分裂,PostgreSQL,堆表,MVCC,版本链,HOT 更新,VACUUM,可见性映射,隔离级别,快照,LSM-Tree,MemTable,SST,压实,布隆过滤器,读写空间放大,数据库教学,3D 可视化,database internals,btree visualization,mvcc visualization,lsm tree visualization"
     />
-    <meta name="author" content="DB Kernel Lab" />
+    <meta name="author" content="tanzhuo" />
+    <link rel="author" href="https://tanzhuo.xyz" />
     <meta name="robots" content="index, follow" />
     <meta name="theme-color" content="#10151d" />
     <link rel="canonical" href="https://tan-zhuo.github.io/db-kernel-lab/" />
@@ -46,6 +47,9 @@
         "description": "纯前端的数据库执行与存储内核可视化平台：3D 呈现三种存储引擎 —— InnoDB 聚簇 B+ 树（页分裂/合并、二级索引与回表）、PostgreSQL 堆表（MVCC 版本链、HOT 更新、VACUUM、隔离级别）、LSM-Tree（MemTable 刷写、分层压实、布隆过滤器），并支持逐事件时间旅行回放。",
         "inLanguage": "zh-CN",
         "isAccessibleForFree": true,
+        "author": { "@type": "Person", "name": "tanzhuo", "url": "https://tanzhuo.xyz" },
+        "codeRepository": "https://github.com/tan-zhuo/db-kernel-lab",
+        "sameAs": ["https://github.com/tan-zhuo/db-kernel-lab", "https://tanzhuo.xyz"],
         "offers": { "@type": "Offer", "price": "0", "priceCurrency": "CNY" },
         "featureList": [
           "可配置阶数的 B+ 树插入、删除、页分裂与页合并 3D 动画",
@@ -200,6 +204,14 @@
         font-size: 11px;
         color: var(--dbkl-boot-faint, #3d4757);
       }
+      .dbkl-boot-link {
+        color: var(--dbkl-boot-dim, #6b7a91);
+        text-decoration: none;
+        border-bottom: 1px solid var(--dbkl-boot-line, #2a3648);
+      }
+      .dbkl-boot-link:hover {
+        color: #2f81f7;
+      }
       @keyframes dbkl-slide {
         0% {
           transform: translateX(-100%);
@@ -262,7 +274,14 @@
         <span>Web Worker 仿真</span>
         <span>IndexedDB 会话恢复</span>
       </div>
-      <p class="dbkl-boot-note">无需后端 · 数据全部留在你的浏览器里</p>
+      <p class="dbkl-boot-note">
+        无需后端 · 数据全部留在你的浏览器里 ·
+        <a class="dbkl-boot-link" href="https://github.com/tan-zhuo/db-kernel-lab" target="_blank" rel="noopener">
+          开源地址
+        </a>
+        ·
+        <a class="dbkl-boot-link" href="https://tanzhuo.xyz" target="_blank" rel="noopener">作者博客 tanzhuo.xyz</a>
+      </p>
       <noscript>
         <p class="dbkl-boot-sub" style="color: #f85149">
           本站是一个交互式 3D 仿真实验室，需要启用 JavaScript 与 WebGL 才能运行。

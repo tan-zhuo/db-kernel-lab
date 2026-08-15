@@ -3,6 +3,7 @@ import { BookOpen, Play, X } from 'lucide-react';
 import { listEngines } from '@dbkl/simulation-core';
 import { ENGINE_GUIDES, type GuideBlock, type GuideSection } from '@/content/engine-guide';
 import { findScenario } from '@/content/scenarios';
+import { AUTHOR, PROJECT_LINKS } from '@/content/links';
 import { runScenario } from '@/content/run-scenario';
 import { useSimStore } from '@/state/store';
 
@@ -86,6 +87,15 @@ export function GuideOverlay() {
         <div className="border-t border-ink-700 p-2">
           <p className="px-1 text-[10px] leading-relaxed text-mute-400">
             正文里的「跑这个实验」会自动切到对应引擎并回放一遍。按 <kbd className="num">Esc</kbd> 关闭。
+          </p>
+          <p className="mt-2 flex flex-wrap gap-x-2 gap-y-1 px-1 text-[10px] text-mute-400">
+            <a className="hover:text-accent-400" href={PROJECT_LINKS.repo} target="_blank" rel="noopener noreferrer">
+              开源地址
+            </a>
+            <span className="text-mute-400/50">·</span>
+            <a className="hover:text-accent-400" href={PROJECT_LINKS.blog} target="_blank" rel="noopener noreferrer">
+              作者博客 {AUTHOR}.xyz
+            </a>
           </p>
         </div>
       </nav>
