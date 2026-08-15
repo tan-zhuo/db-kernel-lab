@@ -1,4 +1,5 @@
-import { expect, test, type ConsoleMessage, type Page } from '@playwright/test';
+import { expect, test } from '@playwright/test';
+import { bulkInsert, collectErrors, openTab, statValue, waitForReady } from './helpers';
 
 /**
  * 关键路径端到端测试：验证纯静态产物在真实浏览器里跑得通
@@ -6,31 +7,6 @@ import { expect, test, type ConsoleMessage, type Page } from '@playwright/test';
  *
  * 无头环境用 SwiftShader 软件渲染，因此帧率不代表真实性能。
  */
-
-function collectErrors(page: Page): string[] {
-  const errors: string[] = [];
-  page.on('console', (msg: ConsoleMessage) => {
-    if (msg.type() === 'error') errors.push(msg.text());
-  });
-  page.on('pageerror', (err) => errors.push(String(err)));
-  return errors;
-}
-
-async function waitForReady(page: Page): Promise<void> {
-  // 启动画面会在引擎就绪后自行移除
-  await page.waitForSelector('#dbkl-boot', { state: 'detached', timeout: 20_000 });
-  await expect(page.getByText('DB Kernel Lab', { exact: true })).toBeVisible();
-  await expect(page.locator('canvas')).toBeVisible();
-  await expect(page.getByText(/就绪：表 users 已创建|已从 IndexedDB 恢复/)).toBeVisible();
-}
-
-async function bulkInsert(page: Page, count: number): Promise<void> {
-  await page.getByLabel('批量插入').fill(String(count));
-  await page.getByRole('button', { name: '执行', exact: true }).click();
-  await expect(page.getByText(new RegExp(`BULK INSERT ×${count}`)).first()).toBeVisible();
-}
-
-const statValue = (page: Page, label: string) => page.locator(`[data-stat="${label}"] [data-stat-value]`);
 
 test('启动画面：JS 就绪前先给出可读内容，随后自动淡出', async ({ page }) => {
   await page.goto('/', { waitUntil: 'commit' });
@@ -47,7 +23,8 @@ test('启动：3D 场景与引擎就绪，无控制台错误', async ({ page }) 
   const errors = collectErrors(page);
   await page.goto('/');
   await waitForReady(page);
-  await expect(page.getByText('InnoDB-like Clustered B+Tree')).toBeVisible();
+  await expect(page.getByText('DB Kernel Lab', { exact: true })).toBeVisible();
+  await expect(page.getByTestId('engine-picker')).toHaveText(/InnoDB/);
   expect(errors).toEqual([]);
 });
 
@@ -126,6 +103,7 @@ test('跳到下一次页分裂，并能在 3D 中拾取页查看页内结构', a
   }
   expect(picked, '应能在 3D 场景中点选到页').toBe(true);
   // 页检查器展开该页的页头、槽位目录与行记录
+  await openTab(page, 'inspect');
   await expect(page.getByText(/^页 #\d+$/).first()).toBeVisible();
   await expect(page.getByText('slot', { exact: true })).toBeVisible();
   await expect(page.getByText('填充率', { exact: true })).toBeVisible();
@@ -157,6 +135,7 @@ test('二级索引：建索引后场景出现两棵树，等值查询触发回�
   await expect(statValue(page, '二级索引')).toHaveText('1');
 
   // 按 score 等值查询：优化器应选二级索引并回表
+  await openTab(page, 'query');
   await page.getByTestId('q-op').selectOption('eq');
   await page.getByTestId('q-column').selectOption('score');
   await page.getByTestId('q-value').fill(String((7 * 7919) % 100));
@@ -178,6 +157,7 @@ test('覆盖索引：只取索引列时执行计划里没有回表算子', async
   await page.getByTestId('create-index').click();
   await expect(page.getByText(/CREATE INDEX idx_score/).first()).toBeVisible();
 
+  await openTab(page, 'query');
   await page.getByTestId('q-column').selectOption('score');
   await page.getByTestId('q-value').fill(String((3 * 7919) % 100));
   await page.getByTestId('q-projection').selectOption('covering');
@@ -197,6 +177,7 @@ test('强制全表扫描：候选方案对比可见，逻辑读更高', async ({
   await page.getByTestId('create-index').click();
   await expect(page.getByText(/CREATE INDEX idx_score/).first()).toBeVisible();
 
+  await openTab(page, 'query');
   await page.getByTestId('q-column').selectOption('score');
   await page.getByTestId('q-hint').selectOption('none');
   await page.getByTestId('q-run').click();
@@ -213,10 +194,59 @@ test('CREATE TABLE 表单可以重建实验', async ({ page }) => {
   await waitForReady(page);
   await bulkInsert(page, 10);
 
+  await openTab(page, 'config');
   await page.getByText('表结构', { exact: true }).click();
   await page.getByTestId('schema-name').fill('orders');
   await page.getByTestId('create-table').click();
 
   await expect(page.getByText(/已重置：表 orders/)).toBeVisible();
   await expect(statValue(page, '行数')).toHaveText('0');
+});
+
+test('布局：侧栏分组标签页可切换、可整条收起，且记住选择', async ({ page }) => {
+  await page.goto('/');
+  await waitForReady(page);
+
+  // 左栏默认停在「操作」；切到「查询」后执行计划面板跟着过来（它是查询的答案，不该在另一侧）
+  await expect(page.getByTestId('op-insert')).toBeVisible();
+  await openTab(page, 'query');
+  await expect(page.getByTestId('op-insert')).toHaveCount(0);
+  await expect(page.getByTestId('q-run')).toBeVisible();
+  // 执行计划面板跟着查询走：跑一条就在同一个标签里给出答案，不用左右来回扫
+  await page.getByTestId('q-run').click();
+  await expect(page.getByTestId('plan-panel')).toBeVisible();
+
+  // 收起左栏：面板让位给 3D 视口，画布随之变宽
+  const before = (await page.locator('canvas').boundingBox())!.width;
+  await page.getByTestId('rail-left-collapse').click();
+  await expect(page.getByTestId('q-run')).toHaveCount(0);
+  const after = (await page.locator('canvas').boundingBox())!.width;
+  expect(after).toBeGreaterThan(before);
+
+  // 刷新后仍是收起状态、仍停在「查询」——布局偏好记在本机
+  await page.reload();
+  await waitForReady(page);
+  await expect(page.getByTestId('rail-left-expand')).toBeVisible();
+  await page.getByTestId('rail-left-expand').click();
+  await expect(page.getByTestId('q-run')).toBeVisible();
+});
+
+test('顶栏：引擎下拉与导出菜单都是按需展开的', async ({ page }) => {
+  await page.goto('/');
+  await waitForReady(page);
+
+  await expect(page.getByTestId('engine-menu')).toHaveCount(0);
+  await page.getByTestId('engine-picker').click();
+  await expect(page.getByTestId('engine-menu')).toBeVisible();
+  // 五个引擎都在同一个下拉里，各带一句「先记住这个」
+  for (const id of ['innodb-btree', 'postgres-heap', 'lsm-tree', 'columnar', 'kv-hash']) {
+    await expect(page.getByTestId(`engine-${id}`)).toBeVisible();
+  }
+  await page.keyboard.press('Escape');
+  await expect(page.getByTestId('engine-menu')).toHaveCount(0);
+
+  await page.getByTestId('export-menu').click();
+  await expect(page.getByTestId('export-events')).toBeVisible();
+  await expect(page.getByTestId('export-state')).toBeVisible();
+  await expect(page.getByTestId('export-shot')).toBeVisible();
 });

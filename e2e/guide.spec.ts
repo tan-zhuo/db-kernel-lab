@@ -69,7 +69,7 @@ test('正文里的「跑这个实验」会切引擎并真的跑起来', async ({
 
   // 讲解自动关闭，引擎切到列存，实验跑完
   await expect(page.getByTestId('guide-overlay')).toHaveCount(0);
-  await expect(page.getByText('Columnar (ClickHouse-like)')).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId('engine-picker')).toHaveText(/列存/, { timeout: 30_000 });
   await expect(page.getByText(/省了 \d+%/).first()).toBeVisible({ timeout: 40_000 });
   expect(errors).toEqual([]);
 });
@@ -94,5 +94,5 @@ test('从讲解页可以直接切到对应引擎', async ({ page }) => {
   await page.getByTestId('guide-nav-kv').click();
   await page.getByRole('button', { name: '切到这个引擎' }).click();
   await expect(page.getByTestId('guide-overlay')).toHaveCount(0);
-  await expect(page.getByText('KV Hash Index (Bitcask-like)')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('engine-picker')).toHaveText(/哈希索引/, { timeout: 20_000 });
 });

@@ -1,3 +1,5 @@
+import { useState } from 'react';
+import { ChevronDown, ChevronRight, Keyboard } from 'lucide-react';
 import { PALETTE } from '@dbkl/visualization';
 import { useCapability, useLabState, useSimStore } from '@/state/store';
 
@@ -62,8 +64,16 @@ const SHORTCUTS = [
   ['B / L', '缓冲池 / 标签'],
 ];
 
-/** 3D 视口上的 2D 覆盖层：图例、当前操作、快捷键提示。图例随引擎能力切换。 */
+/**
+ * 3D 视口上的 2D 覆盖层。
+ *
+ * 它盖在主角身上，所以只留**真正随时要看**的东西：当前操作与实时读数。
+ * 图例可折叠（认熟了就收起来），快捷键默认收成一个小按钮 ——
+ * 它以前长期占着左下角，但绝大多数时候没人在看。
+ */
 export function SceneOverlay() {
+  const [legendOpen, setLegendOpen] = useState(true);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const state = useLabState();
   const selectedPageId = useSimStore((s) => s.selectedPageId);
   const selectedSstId = useSimStore((s) => s.selectedSstId);
@@ -88,8 +98,8 @@ export function SceneOverlay() {
 
   return (
     <>
-      <div className="pointer-events-none absolute left-3 top-3 flex flex-col gap-2">
-        <div className="rounded-md border border-ink-700 bg-ink-900/85 px-2.5 py-2 backdrop-blur">
+      <div className="absolute left-3 top-3 flex max-w-[320px] flex-col gap-2">
+        <div className="pointer-events-none rounded-md border border-ink-700 bg-ink-900/85 px-2.5 py-2 backdrop-blur">
           <div className="mb-1 text-[10px] uppercase tracking-wider text-mute-400">当前操作</div>
           <div className="num text-[12px] text-mute-200">
             {activeCommand ? activeCommand.label : '空闲'}
@@ -151,28 +161,57 @@ export function SceneOverlay() {
           )}
         </div>
 
-        <div className="rounded-md border border-ink-700 bg-ink-900/85 px-2.5 py-2 backdrop-blur">
-          <div className="mb-1 text-[10px] uppercase tracking-wider text-mute-400">图例</div>
-          <div className="grid grid-cols-2 gap-x-3 gap-y-1">
-            {legend.map((l) => (
-              <div key={l.label} className="flex items-center gap-1.5 text-[11px] text-mute-300">
-                <span className="h-2.5 w-2.5 rounded-sm" style={{ background: l.color }} />
-                {l.label}
-              </div>
-            ))}
-          </div>
+        <div className="pointer-events-auto rounded-md border border-ink-700 bg-ink-900/85 backdrop-blur">
+          <button
+            className="flex w-full items-center gap-1 px-2.5 py-1.5 text-[10px] uppercase tracking-wider text-mute-400 hover:text-mute-200"
+            onClick={() => setLegendOpen(!legendOpen)}
+            title={legendOpen ? '收起图例' : '展开图例'}
+          >
+            {legendOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+            图例
+            {!legendOpen && <span className="ml-1 normal-case tracking-normal text-mute-400/70">{legend.length} 项</span>}
+          </button>
+          {legendOpen && (
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1 px-2.5 pb-2">
+              {legend.map((l) => (
+                <div key={l.label} className="flex items-center gap-1.5 text-[11px] text-mute-300">
+                  <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ background: l.color }} />
+                  {l.label}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 
-      <div className="pointer-events-none absolute bottom-3 left-3 rounded-md border border-ink-700 bg-ink-900/70 px-2.5 py-2 backdrop-blur">
-        <div className="grid grid-cols-[auto_auto] gap-x-3 gap-y-0.5">
-          {SHORTCUTS.map(([k, v]) => (
-            <div key={k} className="contents">
-              <kbd className="num text-[10px] text-accent-400">{k}</kbd>
-              <span className="text-[10px] text-mute-400">{v}</span>
+      {/* 快捷键：默认收成一个小按钮。它以前长期占着左下角，但绝大多数时候没人在看。 */}
+      <div className="absolute bottom-3 left-3">
+        {shortcutsOpen ? (
+          <div className="rounded-md border border-ink-700 bg-ink-900/85 px-2.5 py-2 backdrop-blur">
+            <button
+              className="mb-1 flex items-center gap-1 text-[10px] uppercase tracking-wider text-mute-400 hover:text-mute-200"
+              onClick={() => setShortcutsOpen(false)}
+            >
+              <ChevronDown size={11} /> 快捷键
+            </button>
+            <div className="grid grid-cols-[auto_auto] gap-x-3 gap-y-0.5">
+              {SHORTCUTS.map(([k, v]) => (
+                <div key={k} className="contents">
+                  <kbd className="num text-[10px] text-accent-400">{k}</kbd>
+                  <span className="text-[10px] text-mute-400">{v}</span>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          </div>
+        ) : (
+          <button
+            className="rounded-md border border-ink-700 bg-ink-900/70 px-2 py-1.5 text-[10px] text-mute-400 backdrop-blur hover:text-mute-200"
+            onClick={() => setShortcutsOpen(true)}
+            title="显示快捷键"
+          >
+            <Keyboard size={12} />
+          </button>
+        )}
       </div>
 
       {(selectedPageId !== null || selectedSstId !== null) && (

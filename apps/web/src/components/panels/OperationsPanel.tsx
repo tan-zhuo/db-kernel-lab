@@ -42,10 +42,11 @@ export function OperationsPanel() {
   return (
     <Panel title="操作" subtitle="每个操作都会在 Worker 中生成事件流">
       <div className="flex flex-col gap-3">
-        <div className="flex items-end gap-2">
-          <Field label="主键 key">
-            <input className="dbkl-input" type="number" value={key} onChange={(e) => setKey(Number(e.target.value))} />
-          </Field>
+        {/* 键单独一行、四个动作排成 2×2：挤在一行里时窄侧栏会把标签压成竖排。 */}
+        <Field label="主键 key">
+          <input className="dbkl-input" type="number" value={key} onChange={(e) => setKey(Number(e.target.value))} />
+        </Field>
+        <div className="grid grid-cols-2 gap-2">
           <button
             className="dbkl-btn dbkl-btn-primary"
             data-testid="op-insert"
@@ -69,10 +70,20 @@ export function OperationsPanel() {
           >
             <Pencil size={13} /> 更新
           </button>
-          <button className="dbkl-btn" data-testid="op-search" disabled={busy} onClick={() => exec({ kind: 'search', key })}>
+          <button
+            className="dbkl-btn"
+            data-testid="op-search"
+            disabled={busy}
+            onClick={() => exec({ kind: 'search', key })}
+          >
             <Search size={13} /> 点查
           </button>
-          <button className="dbkl-btn" data-testid="op-delete" disabled={busy} onClick={() => exec({ kind: 'delete', key })}>
+          <button
+            className="dbkl-btn"
+            data-testid="op-delete"
+            disabled={busy}
+            onClick={() => exec({ kind: 'delete', key })}
+          >
             <Trash2 size={13} /> 删除
           </button>
         </div>
