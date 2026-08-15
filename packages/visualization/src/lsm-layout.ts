@@ -24,6 +24,9 @@ export interface LsmLayoutOptions {
   minBrickWidth: number;
   /** MemTable 与 L0 之间的额外间距。 */
   memtableGap: number;
+  /** WAL 条带（画在 MemTable 上方）的高度与间距。 */
+  walHeight: number;
+  walGap: number;
 }
 
 export const DEFAULT_LSM_LAYOUT: LsmLayoutOptions = {
@@ -33,6 +36,8 @@ export const DEFAULT_LSM_LAYOUT: LsmLayoutOptions = {
   brickDepth: 1.1,
   minBrickWidth: 0.55,
   memtableGap: 1.8,
+  walHeight: 0.5,
+  walGap: 1.5,
 };
 
 export interface SstBrick {
@@ -69,8 +74,37 @@ export interface MemtableBox {
   frozen: number;
 }
 
+/** 一个仍需保留的 WAL 段：宽度 ∝ 记录数，看得出「崩了要重放多少」。 */
+export interface WalSegmentBox {
+  id: string;
+  sealed: boolean;
+  records: number;
+  x: number;
+  y: number;
+  z: number;
+  width: number;
+  height: number;
+  depth: number;
+}
+
+/** 一个排队中的后台任务，画在它要作用的那一层旁边。 */
+export interface BgJobBox {
+  id: number;
+  kind: 'flush' | 'compaction';
+  level: number;
+  x: number;
+  y: number;
+  z: number;
+  size: number;
+}
+
 export interface LsmLayout {
   memtable: MemtableBox;
+  /** WAL 条带；空数组表示日志已经全部随刷盘回收。 */
+  wal: WalSegmentBox[];
+  walY: number;
+  /** 后台任务积压。 */
+  bgJobs: BgJobBox[];
   bricks: SstBrick[];
   byId: Map<string, SstBrick>;
   /** 每层的标题信息，用于场景里的文字标签。 */
@@ -120,6 +154,29 @@ export function layoutLsm(
     frozen: l.immutable.length,
   };
 
+  // —— WAL 条带：画在 MemTable 正上方，宽度按记录数分配 ——
+  const walY = topY + opt.walGap;
+  const walSegments = l.wal.segments;
+  const totalWalRecords = walSegments.reduce((n, seg) => n + Math.max(1, seg.records.length), 0);
+  const wal: WalSegmentBox[] = [];
+  let walCursor = -opt.width / 2;
+  for (const seg of walSegments) {
+    const share = Math.max(1, seg.records.length) / Math.max(1, totalWalRecords);
+    const width = Math.max(opt.minBrickWidth, opt.width * share - 0.12);
+    wal.push({
+      id: seg.id,
+      sealed: seg.sealed,
+      records: seg.records.length,
+      x: walCursor + width / 2,
+      y: walY,
+      z: 0,
+      width,
+      height: opt.walHeight,
+      depth: opt.brickDepth * 0.7,
+    });
+    walCursor += width + 0.12;
+  }
+
   const bricks: SstBrick[] = [];
   const byId = new Map<string, SstBrick>();
   const levels: LsmLayout['levels'] = [];
@@ -165,17 +222,34 @@ export function layoutLsm(
     });
   });
 
+  // —— 后台任务：排在它要作用的那一层右侧 ——
+  const bgJobs: BgJobBox[] = l.bgQueue.map((job, i) => {
+    const targetY = job.kind === 'flush' ? topY - opt.memtableGap * 0.5 : (levels[job.level]?.y ?? topY);
+    return {
+      id: job.id,
+      kind: job.kind,
+      level: job.level,
+      x: opt.width / 2 + 0.9 + (i % 4) * 0.62,
+      y: targetY + Math.floor(i / 4) * 0.62,
+      z: 0,
+      size: 0.44,
+    };
+  });
+
   return {
     memtable,
+    wal,
+    walY,
+    bgJobs,
     bricks,
     byId,
     levels,
     keyRange: { min, max },
     bounds: {
       minX: -opt.width / 2,
-      maxX: opt.width / 2,
+      maxX: opt.width / 2 + (bgJobs.length > 0 ? 3.4 : 0),
       minY: minY - opt.brickHeight,
-      maxY: topY + memtable.height,
+      maxY: walY + opt.walHeight,
     },
   };
 }

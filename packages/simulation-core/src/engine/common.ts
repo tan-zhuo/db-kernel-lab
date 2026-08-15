@@ -118,6 +118,10 @@ export function commandLabel(c: Command): string {
       return 'FLUSH MEMTABLE → L0';
     case 'compact':
       return c.level === undefined ? 'COMPACT (自动选层)' : `COMPACT L${c.level} → L${c.level + 1}`;
+    case 'run_background':
+      return `推进后台任务${c.jobs ? ` ×${c.jobs}` : ''}`;
+    case 'crash':
+      return '💥 CRASH + RECOVER FROM WAL';
     default: {
       const never: never = c;
       void never;

@@ -142,9 +142,17 @@ type SimulationEvent = EventMeta & SimulationEventBody;
 
 | 事件 | 语义 |
 |---|---|
-| `WAL_APPEND` | 写入先落 WAL（本仿真不做崩溃恢复重放，只体现「先写日志」的顺序） |
+| `WAL_APPEND` | 写入先落 WAL，带所属段 id。**必定排在同一次写入的 `MEMTABLE_PUT` 之前** |
+| `WAL_SEAL` | MemTable 冻结时把当前段封口并绑定它，新写入转入 `nextSegmentId` |
+| `WAL_TRUNCATE` | 段被回收。`reason='flushed'` 是「那份数据已落成 SST」，`reason='recovered'` 是恢复后丢弃旧日志。**这是 WAL 不会无限增长的唯一原因** |
+| `CRASH` | 模拟崩溃：内存里的 MemTable / 冻结队列 / 后台任务全丢，SST 与 WAL 幸存 |
+| `WAL_REPLAY` | 重放一个日志段（带 lsn 区间） |
+| `RECOVER_END` | 恢复完成，带重放条数、还原键数、以及立刻落成的那个 SST |
 | `MEMTABLE_PUT` | 写进 MemTable。`tombstone=true` 是删除，`overwrite=true` 是覆盖同键 |
-| `MEMTABLE_FREEZE` | MemTable 满了，整块冻结成不可变表等待刷盘 |
+| `MEMTABLE_FREEZE` | MemTable 满了，整块冻结成不可变表。**携带全部条目**——后台积压时它可能排很久才落盘，这段时间里这些数据依然读得到，只带条数会让它们从可视化里消失 |
+| `BG_JOB_SCHEDULED` | 后台任务入队（刷写 / 压实），带入队后的积压深度 = 压实债务 |
+| `BG_JOB_RUN` | 后台任务执行，带排队等了多少个事件；`forced=true` 表示是被写停顿逼着在写路径上同步跑的 |
+| `WRITE_STALL` | 写停顿：`immutable-full`（冻结队列满）或 `l0-stop`（L0 文件过多） |
 | `SST_CREATE` | 生成一个 SST 文件，携带**全部条目**（键 + 行 + 是否墓碑）、层号、键区间、来源（`flush` / `compaction`） |
 | `SST_DROP` | 文件被压实吃掉或过期 |
 | `COMPACTION_BEGIN` / `COMPACTION_END` | 压实起止：输入/输出文件、进出条目数、丢弃了多少旧版本与墓碑 |
@@ -167,7 +175,10 @@ type SimulationEvent = EventMeta & SimulationEventBody;
 * 更新序列（堆表）：`HEAP_INSERT`(新版本) → `HEAP_SET_XMAX`(旧版本) → 非 HOT 时才有索引的 `RECORD_INSERT`；
 * 回堆序列：索引的 `DESCEND`/`SCAN_STEP` → `PAGE_READ`(堆页) → `VISIBILITY_CHECK`* → `HEAP_FETCH`；
 * VACUUM 序列：`VACUUM_BEGIN` → (`LINE_POINTER` | `HEAP_PRUNE` | `RECORD_DELETE`)* → `VISIBILITY_MAP`* → `VACUUM_END`；
-* LSM 写序列：`WAL_APPEND` → `MEMTABLE_PUT` →（满了才有）`MEMTABLE_FREEZE` → `SST_CREATE`；
+* LSM 写序列：`WAL_APPEND` → `MEMTABLE_PUT` →（满了才有）`MEMTABLE_FREEZE` → `WAL_SEAL` → `BG_JOB_SCHEDULED`；
+  真正的刷盘发生在后来的 `BG_JOB_RUN` → `SST_CREATE` → `WAL_TRUNCATE`；
+* LSM 停顿序列：`WRITE_STALL` → `BG_JOB_RUN(forced=true)` → `SST_CREATE` / `COMPACTION_*`；
+* LSM 崩溃序列：`CRASH` → `WAL_REPLAY`* → `MEMTABLE_PUT`* → `MEMTABLE_FREEZE` → `SST_CREATE` → `WAL_TRUNCATE(recovered)`* → `RECOVER_END`；
 * LSM 压实序列：`COMPACTION_BEGIN` → `SST_DROP`* → `SST_CREATE`* → `COMPACTION_END`；
 * LSM 读序列：`SEARCH_BEGIN` → (`BLOOM_PROBE`? → `SST_PROBE`?)* → `LSM_GET_RESULT` → `SEARCH_RESULT`。
 

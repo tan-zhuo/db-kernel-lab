@@ -24,12 +24,13 @@ const HEAP_LEGEND: { color: string; label: string }[] = [
 ];
 
 const LSM_LEGEND: { color: string; label: string }[] = [
-  { color: PALETTE.memtable, label: 'MemTable' },
+  { color: PALETTE.memtable, label: 'MemTable / WAL 当前段' },
+  { color: PALETTE.update, label: 'WAL 已封口段（待落盘）' },
   { color: PALETTE.memtableFrozen, label: '已冻结待刷盘' },
   { color: PALETTE.sstLevel[0], label: 'L0（区间重叠）' },
   { color: PALETTE.sstLevel[1], label: 'L1' },
   { color: PALETTE.sstLevel[2], label: 'L2+' },
-  { color: PALETTE.compacting, label: '正在压实' },
+  { color: PALETTE.compacting, label: '正在压实 / 压实任务积压' },
   { color: PALETTE.tombstone, label: '墓碑占比高' },
 ];
 
@@ -86,6 +87,14 @@ export function SceneOverlay() {
             <div className="num mt-1 text-[11px] text-teal-500">
               读放大 {state.lsm.lastGet.probes} 个 SST · 布隆跳过 {state.lsm.lastGet.bloomSkips}
             </div>
+          )}
+          {state.lsm && state.lsm.bgQueue.length > 0 && (
+            <div className="num mt-1 text-[11px] text-orange-500">
+              后台积压 {state.lsm.bgQueue.length} 个任务（刷写/压实都不在写路径上）
+            </div>
+          )}
+          {state.lsm?.lastStall && (
+            <div className="num mt-1 max-w-[300px] text-[11px] text-red-500">⚠ 写停顿 ×{state.lsm.stalls}</div>
           )}
           {result && (
             <div className={`num mt-1 text-[11px] ${result.found ? 'text-green-500' : 'text-red-500'}`}>

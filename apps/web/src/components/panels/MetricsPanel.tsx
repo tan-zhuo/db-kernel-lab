@@ -138,6 +138,23 @@ export function MetricsPanel() {
               tone={m.bloomSkips > 0 ? 'good' : 'default'}
               hint="布隆过滤器判定「一定不存在」而省掉的文件读"
             />
+            <Stat
+              label="后台积压"
+              value={formatNumber(lsm.bgQueue.length)}
+              tone={lsm.bgQueue.length > 3 ? 'bad' : lsm.bgQueue.length > 0 ? 'warn' : 'good'}
+              hint="排队等着刷写 / 压实的任务数 —— 压实债务"
+            />
+            <Stat
+              label="写停顿"
+              value={formatNumber(lsm.stalls)}
+              tone={lsm.stalls > 0 ? 'bad' : 'good'}
+              hint="写入跑赢后台压实，写路径被迫停下来等"
+            />
+            <Stat
+              label="WAL 待恢复"
+              value={formatNumber(lsm.wal.segments.reduce((n, seg) => n + seg.records.length, 0))}
+              hint="还没落成 SST、崩溃后要靠重放救回来的条数"
+            />
           </>
         )}
       </div>

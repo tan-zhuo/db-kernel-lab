@@ -1,4 +1,4 @@
-import { ArrowDownToLine, Layers } from 'lucide-react';
+import { ArrowDownToLine, Layers, ScrollText, Zap, ZapOff } from 'lucide-react';
 import { formatNumber } from '@dbkl/shared';
 import { levelColor } from '@dbkl/visualization';
 import {
@@ -14,6 +14,9 @@ import { Panel, Stat } from '@/components/ui/Panel';
 
 /**
  * LSM 面板：MemTable 水位、层级分布、三种放大、以及最近一次读取的探测轨迹。
+ *
+ * 后台任务队列是理解 LSM 写入为什么快的关键：写路径只把 MemTable 冻结、
+ * 排一个任务就返回，真正的刷盘与压实在后台做。追不上就积压，积压到阈值就写停顿。
  *
  * 三个放大数字是整个 LSM 调参的全部矛盾：
  *  - 写放大：一条记录被重写了几遍（压实越勤越大）
@@ -35,6 +38,7 @@ export function LsmPanel() {
   const writeAmp = writeAmplification(l);
   const spaceAmp = spaceAmplification(l);
   const memFill = l.memtable.limit === 0 ? 0 : l.memtable.entries.length / l.memtable.limit;
+  const retainedRecords = l.wal.segments.reduce((n, seg) => n + seg.records.length, 0);
   const lastGet = l.lastGet;
   const capacityOf = (level: number) => state.config.memtableLimit * Math.pow(state.config.levelFanout, level);
 
@@ -124,9 +128,114 @@ export function LsmPanel() {
           <Stat label="刷写" value={l.flushes} hint="MemTable → L0 的次数" />
           <Stat label="压实" value={l.compactions} />
           <Stat label="丢弃条目" value={formatNumber(l.droppedEntries)} hint="压实时被覆盖的旧版本与被回收的墓碑" />
-          <Stat label="WAL 记录" value={formatNumber(l.wal.records)} />
-          <Stat label="WAL 字节" value={formatNumber(l.wal.bytes)} />
+          <Stat label="WAL 累计" value={formatNumber(l.wal.records)} hint="写过的日志总条数（含已回收的）" />
+          <Stat
+            label="WAL 待恢复"
+            value={formatNumber(retainedRecords)}
+            tone={retainedRecords > 0 ? 'warn' : 'good'}
+            hint="还没落成 SST、崩溃后要靠重放救回来的条数"
+          />
           <Stat label="落盘条目" value={formatNumber(l.entriesWritten)} />
+          <Stat
+            label="写停顿"
+            value={formatNumber(l.stalls)}
+            tone={l.stalls > 0 ? 'bad' : 'good'}
+            hint="写入跑赢后台压实，写路径被迫停下来等"
+          />
+          <Stat label="崩溃次数" value={formatNumber(l.crashes)} hint="手动触发的崩溃恢复演练" />
+          <Stat
+            label="积压峰值"
+            value={formatNumber(l.maxQueueDepth)}
+            tone={l.maxQueueDepth > 3 ? 'warn' : 'default'}
+            hint="历史最大后台任务积压 —— 压实债务的峰值"
+          />
+        </div>
+
+        {/* —— 后台任务队列：LSM 写入之所以快，就是因为这些活不在写路径上 —— */}
+        <div className="rounded-md border border-ink-700 bg-ink-850/60 p-2">
+          <div className="flex items-baseline justify-between text-[11px]">
+            <span className="text-mute-400">后台任务积压</span>
+            <span
+              className={`num ${
+                l.bgQueue.length === 0 ? 'text-green-500' : l.bgQueue.length > 3 ? 'text-red-500' : 'text-amber-500'
+              }`}
+              data-testid="bg-backlog"
+            >
+              {l.bgQueue.length}
+              {l.maxQueueDepth > 0 && <span className="text-mute-400"> / 峰值 {l.maxQueueDepth}</span>}
+            </span>
+          </div>
+          {l.bgQueue.length === 0 ? (
+            <p className="mt-1 text-[10.5px] text-mute-400/80">
+              后台跟得上写入，没有压实债务。
+            </p>
+          ) : (
+            <div className="num mt-1 flex flex-wrap gap-1">
+              {l.bgQueue.slice(0, 12).map((job) => (
+                <span
+                  key={job.id}
+                  title={job.reason}
+                  className={`rounded px-1 py-[1px] text-[10px] ${
+                    job.kind === 'flush' ? 'bg-teal-500/15 text-teal-500' : 'bg-violet-500/15 text-violet-400'
+                  }`}
+                >
+                  #{job.id} {job.kind === 'flush' ? '刷写' : `压实 L${job.level}`}
+                </span>
+              ))}
+            </div>
+          )}
+          {l.lastStall && (
+            <div className="mt-1.5 border-t border-ink-700 pt-1.5">
+              <div className="flex items-baseline justify-between text-[11px]">
+                <span className="text-red-500">⚠ 写停顿 ×{l.stalls}</span>
+                <span className="num text-mute-400">
+                  {l.lastStall.reason === 'immutable-full' ? '冻结队列满' : 'L0 文件过多'}
+                </span>
+              </div>
+              <p className="mt-0.5 text-[10.5px] leading-relaxed text-mute-400">{l.lastStall.note}</p>
+            </div>
+          )}
+        </div>
+
+        {/* —— WAL：它真的存着还没落盘的那部分数据 —— */}
+        <div className="rounded-md border border-ink-700 bg-ink-850/60 p-2">
+          <div className="flex items-baseline justify-between text-[11px]">
+            <span className="flex items-center gap-1 text-mute-400">
+              <ScrollText size={12} /> WAL 保留段
+            </span>
+            <span className="num text-mute-200" data-testid="wal-retained">
+              {retainedRecords} 条待恢复
+            </span>
+          </div>
+          <div className="num mt-1 flex flex-wrap gap-1">
+            {l.wal.segments.length === 0 && <span className="text-[10.5px] text-mute-400">—</span>}
+            {l.wal.segments.map((seg) => (
+              <span
+                key={seg.id}
+                title={
+                  seg.sealed
+                    ? `已封口，绑定 ${seg.memtableId}；等它落成 SST 后就会被回收`
+                    : '当前正在写入的段'
+                }
+                className={`rounded px-1 py-[1px] text-[10px] ${
+                  seg.sealed ? 'bg-amber-500/15 text-amber-500' : 'bg-teal-500/15 text-teal-500'
+                }`}
+              >
+                {seg.id} · {seg.records.length}
+                {seg.sealed ? ' 封口' : ''}
+              </span>
+            ))}
+          </div>
+          <p className="mt-1 text-[10.5px] leading-relaxed text-mute-400/80">
+            已回收 {l.wal.truncatedRecords} 条（对应数据已落成 SST，日志不再需要）。
+            崩溃时内存里的 MemTable 与冻结队列全丢，能救回来的正好是上面这些。
+          </p>
+          {l.lastRecovery && (
+            <p className="mt-1 text-[10.5px] leading-relaxed text-green-500">
+              上次恢复：重放 {l.lastRecovery.replayedRecords} 条日志、还原 {l.lastRecovery.restoredKeys} 个键
+              {l.lastRecovery.flushedToSst ? `，并立即落成 ${l.lastRecovery.flushedToSst}` : ''}。
+            </p>
+          )}
         </div>
 
         <div className="flex gap-2">
@@ -145,6 +254,26 @@ export function LsmPanel() {
             onClick={() => exec({ kind: 'compact' })}
           >
             <Layers size={13} /> 触发压实
+          </button>
+        </div>
+        <div className="flex gap-2">
+          <button
+            className={`dbkl-btn flex-1 ${l.bgQueue.length > 0 ? 'dbkl-btn-primary' : ''}`}
+            data-testid="run-background"
+            disabled={busy}
+            title="给后台线程一点 CPU，把积压的刷写 / 压实任务推进一批"
+            onClick={() => exec({ kind: 'run_background' })}
+          >
+            {l.bgQueue.length > 0 ? <Zap size={13} /> : <ZapOff size={13} />} 推进后台
+          </button>
+          <button
+            className="dbkl-btn flex-1"
+            data-testid="crash"
+            disabled={busy}
+            title="模拟进程崩溃：内存里的 MemTable 与冻结队列全部丢失，随后从 WAL 重放恢复"
+            onClick={() => exec({ kind: 'crash' })}
+          >
+            💥 崩溃 + 恢复
           </button>
         </div>
 
@@ -180,6 +309,7 @@ export function LsmPanel() {
         <p className="text-[10.5px] leading-relaxed text-mute-400/80">
           场景里砖块的**宽度就是键区间**：L0 的文件互相重叠（所以点查要全看一遍），
           L1 及以下整齐排开、绝不重叠（所以每层最多读一个文件）。颜色越红表示墓碑占比越高。
+          把「后台任务上限」调成 0 再批量写入，就能看到积压一路涨到写停顿。
         </p>
       </div>
     </Panel>

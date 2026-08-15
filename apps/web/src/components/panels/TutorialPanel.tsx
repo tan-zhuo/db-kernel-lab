@@ -346,6 +346,51 @@ const SCENARIOS: Scenario[] = [
     ],
   },
   {
+    id: 'lsm-background',
+    engineId: LSM_ENGINE_ID,
+    title: '⑨ 刷写与压实根本不在写路径上',
+    goal:
+      '把后台任务上限调成 0：写 8 条会冻结两次，但**一个 SST 都不会生成** —— ' +
+      '写路径只排了两个任务就返回了。这就是 LSM 写入快的全部秘密。看完点「推进后台」把活干掉。',
+    config: { memtableLimit: 4, maxBackgroundJobs: 0, maxImmutableMemtables: 99, l0StopTrigger: 99 },
+    commands: [{ kind: 'bulk_insert', count: 8, pattern: 'sequential', start: 1 }],
+  },
+  {
+    id: 'lsm-write-stall',
+    engineId: LSM_ENGINE_ID,
+    title: '⑩ 写入跑赢压实 → 写停顿',
+    goal:
+      '后台一点 CPU 都不给、冻结队列只允许 2 个：连写 40 条，积压一路涨到上限，' +
+      '写路径被迫停下来自己刷盘 —— 事件日志里成片的 ⚠ 写停顿就是 LSM 最著名的运维事故现场。',
+    config: { memtableLimit: 2, maxBackgroundJobs: 0, maxImmutableMemtables: 2, l0StopTrigger: 6 },
+    commands: [{ kind: 'bulk_insert', count: 40, pattern: 'sequential', start: 1 }],
+  },
+  {
+    id: 'lsm-wal-lifecycle',
+    engineId: LSM_ENGINE_ID,
+    title: '⑪ WAL 为什么不会无限涨',
+    goal:
+      '每条写入先落 WAL 再改内存；MemTable 冻结时日志段封口，那份数据落成 SST 之后段就被回收。' +
+      '所以 WAL 里永远只剩「还没落盘的那一小段」—— 面板上的「WAL 待恢复」就是这个数。',
+    config: { memtableLimit: 4, maxBackgroundJobs: 4 },
+    commands: [{ kind: 'bulk_insert', count: 8, pattern: 'sequential', start: 1 }],
+  },
+  {
+    id: 'lsm-crash-recovery',
+    engineId: LSM_ENGINE_ID,
+    title: '⑫ 崩溃：内存全丢，WAL 全救回来',
+    goal:
+      '先写 10 条但一条都不刷盘（全在 MemTable 与冻结队列里），然后触发崩溃：' +
+      '内存结构瞬间清空，接着逐段重放 WAL 把 10 个键一条不少地装回来，并立刻落成 SST。' +
+      '这是 WAL 唯一能证明自己有用的地方。',
+    config: { memtableLimit: 4, maxBackgroundJobs: 0, maxImmutableMemtables: 99, l0StopTrigger: 99 },
+    commands: [
+      { kind: 'bulk_insert', count: 10, pattern: 'sequential', start: 1 },
+      { kind: 'crash' },
+      { kind: 'full_scan' },
+    ],
+  },
+  {
     id: 'lsm-range',
     engineId: LSM_ENGINE_ID,
     title: '⑧ 区间扫描用不上布隆过滤器',

@@ -32,6 +32,38 @@ interface Sst {
   bloom: Bloom;
 }
 
+/** WAL 里的一条记录。崩溃后靠它把 MemTable 重建出来。 */
+interface WalRecord {
+  lsn: number;
+  op: 'put' | 'delete';
+  key: Key;
+  row: Row | null;
+}
+
+/**
+ * 一个 WAL 段。
+ *
+ * 生命周期与一个 MemTable 严格绑定：MemTable 冻结时段封口，
+ * 那份数据落成 SST 之后段就被回收 —— 所以 WAL **只保留还没落盘的那部分**，
+ * 不会无限增长。
+ */
+interface WalSegment {
+  id: string;
+  records: WalRecord[];
+  bytes: number;
+  sealed: boolean;
+  memtableId: string | null;
+}
+
+/** 后台任务：刷写或压实。它们都**不在写路径上**执行。 */
+interface BgJob {
+  id: number;
+  kind: 'flush' | 'compaction';
+  level: number;
+  reason: string;
+  scheduledAtSeq: number;
+}
+
 /**
  * 布隆过滤器（真的实现，不是假装）。
  *
@@ -82,20 +114,26 @@ function mix32(x: number): number {
 
 /** 一条记录的估算字节数，用于「文件大小」展示。 */
 const ENTRY_BYTES = 48;
+/** 写停顿时最多强行推进多少个任务，防止病态参数下卡死。 */
+const STALL_GUARD = 64;
 
 /**
  * Phase 3 引擎：LSM-Tree（RocksDB / LevelDB 风格）。
  *
  * 与前两个引擎的根本区别：**它从不原地修改任何东西**。
  *
- *  - 写：只追加进内存里的 MemTable（先写 WAL）。满了就冻结、刷成 L0 的一个 SST 文件；
+ *  - 写：先写 WAL，再追加进内存里的 MemTable。满了就冻结，**排一个后台任务**就返回；
  *  - 更新：再写一条同键的新记录，旧的还躺在下层文件里；
  *  - 删除：写一条**墓碑**，真正的删除发生在压实到最底层的时候；
  *  - 读：自上而下逐层探测，第一个命中的就是最新版本 —— 这就是读放大；
- *  - 压实：把重叠的文件归并成新文件、丢掉旧版本与墓碑 —— 这就是写放大与空间放大的来源。
+ *  - 刷写与压实：由「后台线程」在命令间隙推进，追不上写入就积压，积压到阈值就**写停顿**。
  *
- * 三种放大互相拉扯（leveled 读放大低、写放大高；tiered 相反），
- * 面板里三个数字会随参数实时变化，这正是 LSM 调参的全部难点。
+ * 两条容易被忽略、但这里都建模了的事：
+ *
+ * 1. **刷写/压实不在写路径上**。写路径只负责把数据塞进内存并排个任务，
+ *    所以 LSM 的写入才那么快；代价是压实债务会累积，最终以写停顿的形式还回来。
+ * 2. **WAL 是有效果的**。它真的存着还没落盘的那部分数据，随着 SST 生成被逐段回收；
+ *    `crash` 命令会把内存全部清掉，然后靠重放 WAL 把数据一条不少地还原回来。
  */
 export class LsmEngine implements StorageEngine {
   readonly name = 'LSM-Tree (RocksDB-like)';
@@ -109,7 +147,20 @@ export class LsmEngine implements StorageEngine {
   private ssts = new Map<string, Sst>();
   private nextSstId = 1;
   private nextMemtableId = 1;
+
+  // —— WAL ——
+  private walSegments: WalSegment[] = [];
+  private nextWalId = 1;
   private lsn = 0;
+  /** 恢复期间重放不再写日志（真实系统同样如此，否则日志会自我复制）。 */
+  private replaying = false;
+
+  // —— 后台任务队列 ——
+  private bgQueue: BgJob[] = [];
+  private nextJobId = 1;
+  /** 累计写停顿次数。 */
+  private stallCount = 0;
+
   private schema: TableSchema | null = null;
   private rng: Rng;
 
@@ -150,6 +201,10 @@ export class LsmEngine implements StorageEngine {
       this.emit({ type: 'NOTE', message: note, level: 'error' });
     }
 
+    // 「后台线程在命令间隙拿到了一点 CPU」—— 这是本仿真表达异步的方式：
+    // 确定性、可重放，但刷写/压实确实不再发生在写路径上。
+    if (this.config.backgroundCompaction) this.drainBackground(this.config.maxBackgroundJobs);
+
     this.emit({ type: 'COMMAND_END', kind: commandKind(command), label, ok, note });
     return this.out;
   }
@@ -161,7 +216,7 @@ export class LsmEngine implements StorageEngine {
       case 'insert': {
         const row = command.row ?? makeRow(this.schema ?? DEFAULT_SCHEMA, command.key);
         this.put(command.key, row, false);
-        return `写入 key=${command.key}（追加进 MemTable，不做任何原地修改）`;
+        return `写入 key=${command.key}（先 WAL，再追加进 MemTable，不做任何原地修改）`;
       }
       case 'update': {
         this.put(command.key, command.row, false);
@@ -186,6 +241,10 @@ export class LsmEngine implements StorageEngine {
         return this.forceFlush();
       case 'compact':
         return this.forceCompact(command.kind === 'compact' ? command.level : undefined);
+      case 'run_background':
+        return this.runBackgroundCommand(command.jobs);
+      case 'crash':
+        return this.crashAndRecover();
       case 'configure': {
         this.config = { ...this.config, ...command.patch };
         this.emit({ type: 'CONFIG_SET', config: { ...this.config } });
@@ -203,7 +262,7 @@ export class LsmEngine implements StorageEngine {
     this.schema = structuredClone(schema);
     this.emit({ type: 'CONFIG_SET', config: { ...this.config } });
     this.emit({ type: 'TABLE_CREATE', schema: this.schema });
-    return `表 ${schema.name} 已创建（LSM：没有预先分配的页，写入即产生 MemTable）`;
+    return `表 ${schema.name} 已创建（LSM：没有预先分配的页，写入即产生 WAL 段与 MemTable）`;
   }
 
   private ensureTable(): void {
@@ -213,6 +272,66 @@ export class LsmEngine implements StorageEngine {
     }
   }
 
+  // ——— WAL ————————————————————————————————————————————————
+
+  /** 当前正在写入的段；没有就开一个。 */
+  private currentWal(): WalSegment {
+    let segment = this.walSegments.find((s) => !s.sealed);
+    if (!segment) {
+      segment = { id: `wal-${this.nextWalId++}`, records: [], bytes: 0, sealed: false, memtableId: null };
+      this.walSegments.push(segment);
+    }
+    return segment;
+  }
+
+  /** 先写日志：这一步必须排在改内存之前，崩溃才有得恢复。 */
+  private appendWal(op: 'put' | 'delete', key: Key, row: Row | null): void {
+    if (this.replaying) return;
+    const segment = this.currentWal();
+    this.lsn++;
+    const bytes = op === 'delete' ? 12 : ENTRY_BYTES;
+    segment.records.push({ lsn: this.lsn, op, key, row: row ? structuredClone(row) : null });
+    segment.bytes += bytes;
+    this.emit({ type: 'WAL_APPEND', lsn: this.lsn, op, key, bytes, segmentId: segment.id });
+  }
+
+  /** MemTable 冻结 ⇒ 当前段封口并绑定它，新写入转入新段。 */
+  private sealWal(memtableId: string): void {
+    const segment = this.currentWal();
+    segment.sealed = true;
+    segment.memtableId = memtableId;
+    const next: WalSegment = {
+      id: `wal-${this.nextWalId++}`,
+      records: [],
+      bytes: 0,
+      sealed: false,
+      memtableId: null,
+    };
+    this.walSegments.push(next);
+    this.emit({
+      type: 'WAL_SEAL',
+      segmentId: segment.id,
+      memtableId,
+      records: segment.records.length,
+      bytes: segment.bytes,
+      nextSegmentId: next.id,
+    });
+  }
+
+  /** 数据落成 SST ⇒ 对应的日志段没用了，回收掉。 */
+  private truncateWalFor(memtableId: string, reason: 'flushed' | 'recovered'): void {
+    const at = this.walSegments.findIndex((s) => s.memtableId === memtableId);
+    if (at < 0) return;
+    const [segment] = this.walSegments.splice(at, 1);
+    this.emit({
+      type: 'WAL_TRUNCATE',
+      segmentId: segment.id,
+      records: segment.records.length,
+      bytes: segment.bytes,
+      reason,
+    });
+  }
+
   // ——— 写路径 ————————————————————————————————————————————
 
   private bulkInsert(cmd: Extract<Command, { kind: 'bulk_insert' }>): string {
@@ -220,6 +339,7 @@ export class LsmEngine implements StorageEngine {
     const { count, pattern } = cmd;
     const start = cmd.start ?? 1;
     const max = cmd.max ?? Math.max(count * 10, 1000);
+    const stallsBefore = this.stallCount;
     for (let i = 0; i < count; i++) {
       let key: Key;
       if (pattern === 'sequential') key = start + i;
@@ -227,23 +347,19 @@ export class LsmEngine implements StorageEngine {
       else key = this.rng.int(1, max);
       this.put(key, makeRow(this.schema!, key), false);
     }
-    return `批量写入 ${count} 条（${pattern}）—— 全部顺序追加，没有任何随机写`;
+    const stalled = this.stallCount - stallsBefore;
+    return `批量写入 ${count} 条（${pattern}）—— 全部顺序追加${
+      stalled > 0 ? `；写入跑赢了后台压实，被迫停顿 ${stalled} 次` : ''
+    }`;
   }
 
   /**
-   * 写入一条记录：先 WAL，再进 MemTable，满了就冻结 + 刷盘 + 视情况压实。
+   * 写入一条记录：**先 WAL，再 MemTable**，满了就冻结并排一个后台刷写任务。
    * 注意「更新」与「删除」走的是同一条路径 —— LSM 只有追加。
    */
   private put(key: Key, row: Row | null, tombstone: boolean): void {
     this.ensureTable();
-    this.lsn++;
-    this.emit({
-      type: 'WAL_APPEND',
-      lsn: this.lsn,
-      op: tombstone ? 'delete' : 'put',
-      key,
-      bytes: tombstone ? 12 : ENTRY_BYTES,
-    });
+    this.appendWal(tombstone ? 'delete' : 'put', key, row);
 
     const at = this.memtable.findIndex((e) => e.key === key);
     const entry: Entry = { key, row: row ? structuredClone(row) : null, tombstone };
@@ -261,25 +377,173 @@ export class LsmEngine implements StorageEngine {
     });
 
     if (this.memtable.length >= this.config.memtableLimit) {
-      this.freezeAndFlush();
-      this.maybeCompact();
+      this.freeze();
+      this.enforceWriteLimits();
     }
   }
 
-  private freezeAndFlush(): void {
+  /**
+   * 冻结 MemTable：整块转成不可变表，**写路径到此为止**。
+   * 后台模式下只排一个刷写任务就返回，写入立刻可以继续进新的 MemTable。
+   */
+  private freeze(): void {
     if (this.memtable.length === 0) return;
     const tableId = `mem-${this.nextMemtableId++}`;
     const entries = this.memtable;
-    this.emit({ type: 'MEMTABLE_FREEZE', tableId, entries: entries.length });
+    this.emit({
+      type: 'MEMTABLE_FREEZE',
+      tableId,
+      entries: entries.map((e) => ({ key: e.key, row: e.row ? structuredClone(e.row) : null, tombstone: e.tombstone })),
+    });
     this.immutable.push({ id: tableId, entries });
     this.memtable = [];
-    this.flushOldestImmutable();
+    this.sealWal(tableId);
+
+    if (this.config.backgroundCompaction) {
+      this.scheduleJob('flush', 0, `MemTable ${tableId} 已冻结，等待刷成 L0`);
+    } else {
+      this.flushOldestImmutable();
+      this.compactWhileNeeded();
+    }
   }
+
+  /**
+   * 写停顿：后台追不上时，写路径只能停下来等。
+   *
+   * 真实 RocksDB 还有一档「限速」（soft slowdown，按令牌桶压低写入速率），
+   * 那需要墙钟才能表达；本仿真只建模硬停顿 —— 即写路径被迫同步跑后台任务。
+   */
+  private enforceWriteLimits(): void {
+    if (!this.config.backgroundCompaction) return;
+
+    // 1. 冻结队列满了：新的 MemTable 无处安放，必须先把最老的刷下去。
+    for (let guard = 0; guard < STALL_GUARD && this.immutable.length > this.config.maxImmutableMemtables; guard++) {
+      this.stallCount++;
+      this.emit({
+        type: 'WRITE_STALL',
+        reason: 'immutable-full',
+        l0Files: this.levels[0]?.length ?? 0,
+        immutableTables: this.immutable.length,
+        queueDepth: this.bgQueue.length,
+        note: `已冻结 ${this.immutable.length} 个 MemTable > 上限 ${this.config.maxImmutableMemtables}，写入必须等一次刷盘完成`,
+      });
+      if (!this.runNextJob('flush', true)) {
+        // 队列里没有刷写任务（同步模式或异常），直接刷。
+        this.flushOldestImmutable();
+      }
+    }
+
+    // 2. L0 文件堆积：再写下去读放大会失控，必须先压实。
+    for (
+      let guard = 0;
+      guard < STALL_GUARD && (this.levels[0]?.length ?? 0) >= this.config.l0StopTrigger;
+      guard++
+    ) {
+      this.stallCount++;
+      this.emit({
+        type: 'WRITE_STALL',
+        reason: 'l0-stop',
+        l0Files: this.levels[0]?.length ?? 0,
+        immutableTables: this.immutable.length,
+        queueDepth: this.bgQueue.length,
+        note: `L0 已有 ${this.levels[0]?.length ?? 0} 个文件 ≥ 停写阈值 ${this.config.l0StopTrigger}，写入必须等压实腾出空间`,
+      });
+      this.scheduleCompactions();
+      if (!this.runNextJob('compaction', true)) {
+        // 停写阈值是硬底线：哪怕还没到软触发值（l0CompactionTrigger），
+        // 也必须立刻压实 L0 腾出空间，否则写入永远解不了封。
+        if ((this.levels[0]?.length ?? 0) >= 2) this.compactLevel(0);
+        else break;
+      }
+    }
+  }
+
+  // ——— 后台任务队列 ————————————————————————————————————
+
+  private scheduleJob(kind: 'flush' | 'compaction', level: number, reason: string): void {
+    // 同一层的压实任务不重复排队：真实系统同样只允许一个 compaction 在跑。
+    if (kind === 'compaction' && this.bgQueue.some((j) => j.kind === 'compaction' && j.level === level)) return;
+    const job: BgJob = { id: this.nextJobId++, kind, level, reason, scheduledAtSeq: this.seq };
+    this.bgQueue.push(job);
+    this.emit({
+      type: 'BG_JOB_SCHEDULED',
+      jobId: job.id,
+      kind,
+      level,
+      reason,
+      queueDepth: this.bgQueue.length,
+    });
+  }
+
+  /** 把「该压实了」的层排进队列（后台模式）。 */
+  private scheduleCompactions(): void {
+    const level = this.pickCompactionLevel();
+    if (level === null) return;
+    this.scheduleJob(
+      'compaction',
+      level,
+      level === 0
+        ? `L0 文件数 ${this.levels[0].length} ≥ 触发值 ${this.config.l0CompactionTrigger}`
+        : `L${level} 超出容量`,
+    );
+  }
+
+  /**
+   * 执行队列里的下一个任务。
+   * `preferred` 用于写停顿时优先跑某一类（等刷盘就先跑刷盘）。
+   */
+  private runNextJob(preferred?: 'flush' | 'compaction', forced = false): boolean {
+    let at = preferred ? this.bgQueue.findIndex((j) => j.kind === preferred) : 0;
+    if (at < 0) at = this.bgQueue.length > 0 ? 0 : -1;
+    if (at < 0) return false;
+    const [job] = this.bgQueue.splice(at, 1);
+
+    this.emit({
+      type: 'BG_JOB_RUN',
+      jobId: job.id,
+      kind: job.kind,
+      level: job.level,
+      waitedSeq: this.seq - job.scheduledAtSeq,
+      queueDepth: this.bgQueue.length,
+      forced,
+    });
+
+    if (job.kind === 'flush') {
+      if (this.immutable.length > 0) this.flushOldestImmutable();
+    } else if (this.levelNeedsCompaction(job.level)) {
+      this.compactLevel(job.level);
+    }
+    // 干完一轮可能又产生了新的压实需求（连锁反应）。
+    this.scheduleCompactions();
+    return true;
+  }
+
+  private drainBackground(max: number): number {
+    let done = 0;
+    for (let i = 0; i < max; i++) {
+      if (this.bgQueue.length === 0) break;
+      if (!this.runNextJob()) break;
+      done++;
+    }
+    return done;
+  }
+
+  private runBackgroundCommand(jobs?: number): string {
+    this.ensureTable();
+    if (this.bgQueue.length === 0) return '后台任务队列是空的，没有积压';
+    const before = this.bgQueue.length;
+    const done = this.drainBackground(jobs ?? this.bgQueue.length);
+    return `推进 ${done} 个后台任务（积压 ${before} → ${this.bgQueue.length}）`;
+  }
+
+  // ——— SST 与压实 ————————————————————————————————————————
 
   private flushOldestImmutable(): void {
     const frozen = this.immutable.shift();
     if (!frozen) return;
     this.createSst(frozen.entries, 0, 'flush');
+    // 数据已经在磁盘上了，对应的 WAL 段可以扔掉 —— WAL 因此不会无限增长。
+    this.truncateWalFor(frozen.id, 'flushed');
   }
 
   private createSst(entries: Entry[], level: number, source: 'flush' | 'compaction'): Sst {
@@ -332,40 +596,41 @@ export class LsmEngine implements StorageEngine {
     this.ensureTable();
     if (this.memtable.length === 0 && this.immutable.length === 0) return 'MemTable 是空的，无需刷写';
     const n = this.memtable.length;
-    this.freezeAndFlush();
-    this.maybeCompact();
+    this.freeze();
+    // 用户明确要求刷写：不走队列，当场做完。
+    while (this.immutable.length > 0) this.flushOldestImmutable();
+    if (this.config.backgroundCompaction) this.scheduleCompactions();
+    else this.compactWhileNeeded();
     return `手动刷写 ${n} 条记录到 L0`;
   }
-
-  // ——— 压实 ————————————————————————————————————————————
 
   /** 每层的条目容量：L0 按文件数触发，其它层按容量放大倍数。 */
   private levelCapacity(level: number): number {
     return this.config.memtableLimit * Math.pow(this.config.levelFanout, level);
   }
 
-  private maybeCompact(): void {
-    // 可能连锁：L0 压到 L1 之后 L1 又满了，如此向下传导。
+  private levelNeedsCompaction(level: number): boolean {
+    if (level === 0) return (this.levels[0]?.length ?? 0) >= this.config.l0CompactionTrigger;
+    const files = this.levels[level];
+    if (!files || files.length === 0) return false;
+    if (this.config.compactionStyle === 'tiered') return files.length >= this.config.levelFanout;
+    return files.reduce((n, s) => n + s.entries.length, 0) > this.levelCapacity(level);
+  }
+
+  private pickCompactionLevel(): number | null {
+    for (let level = 0; level < this.levels.length; level++) {
+      if (this.levelNeedsCompaction(level)) return level;
+    }
+    return null;
+  }
+
+  /** 同步模式下的连锁压实：一直压到没有哪一层超标为止。 */
+  private compactWhileNeeded(): void {
     for (let guard = 0; guard < 32; guard++) {
       const level = this.pickCompactionLevel();
       if (level === null) return;
       this.compactLevel(level);
     }
-  }
-
-  private pickCompactionLevel(): number | null {
-    if ((this.levels[0]?.length ?? 0) >= this.config.l0CompactionTrigger) return 0;
-    for (let level = 1; level < this.levels.length; level++) {
-      const files = this.levels[level];
-      if (files.length === 0) continue;
-      if (this.config.compactionStyle === 'tiered') {
-        if (files.length >= this.config.levelFanout) return level;
-      } else {
-        const entries = files.reduce((n, s) => n + s.entries.length, 0);
-        if (entries > this.levelCapacity(level)) return level;
-      }
-    }
-    return null;
   }
 
   /**
@@ -382,6 +647,7 @@ export class LsmEngine implements StorageEngine {
 
     const wholeLevel = level === 0 || this.config.compactionStyle === 'tiered';
     const picked = wholeLevel ? [...this.levels[level]] : [this.levels[level][0]];
+    if (picked.length === 0) return;
     const minKey = Math.min(...picked.map((s) => s.minKey));
     const maxKey = Math.max(...picked.map((s) => s.maxKey));
     const overlapping =
@@ -447,15 +713,128 @@ export class LsmEngine implements StorageEngine {
   private forceCompact(level?: number): string {
     this.ensureTable();
     if (level === undefined) {
+      // 先把积压的后台任务清干净，再看还有没有该压的层。
+      const drained = this.drainBackground(this.bgQueue.length);
       const pick = this.pickCompactionLevel();
-      if (pick === null) return '当前没有需要压实的层（各层都在容量之内）';
+      if (pick === null) {
+        return drained > 0 ? `推进了 ${drained} 个积压任务，各层都在容量之内了` : '当前没有需要压实的层（各层都在容量之内）';
+      }
       this.compactLevel(pick);
-      this.maybeCompact();
-      return `压实 L${pick} → L${pick + 1} 完成`;
+      this.compactWhileNeeded();
+      return `压实 L${pick} → L${pick + 1} 完成${drained > 0 ? `（另外推进了 ${drained} 个积压任务）` : ''}`;
     }
     assert(this.levels[level]?.length > 0, `L${level} 没有文件可压实`);
     this.compactLevel(level);
     return `压实 L${level} → L${level + 1} 完成`;
+  }
+
+  // ——— 崩溃与恢复 ————————————————————————————————————————
+
+  /**
+   * 模拟崩溃并恢复 —— 这是 WAL **唯一**能证明自己有用的地方。
+   *
+   * 崩溃：MemTable、冻结队列、后台任务都在内存里，全部蒸发；磁盘上只剩 SST 与 WAL。
+   * 恢复：按 lsn 顺序重放保留下来的 WAL 段，把数据装回 MemTable，
+   *       随后立刻落成一个 SST 并丢弃旧日志（LevelDB 的恢复流程就是这样）。
+   */
+  private crashAndRecover(): string {
+    this.ensureTable();
+    const lostMemtable = this.memtable.length;
+    const lostImmutable = this.immutable.length;
+    const lostJobs = this.bgQueue.length;
+    const retained = this.walSegments.reduce((n, s) => n + s.records.length, 0);
+
+    this.emit({
+      type: 'CRASH',
+      lostMemtableEntries: lostMemtable,
+      lostImmutableTables: lostImmutable,
+      lostBackgroundJobs: lostJobs,
+      retainedWalRecords: retained,
+      survivingSsts: this.ssts.size,
+    });
+
+    // 内存里的东西全没了。
+    this.memtable = [];
+    this.immutable = [];
+    this.bgQueue = [];
+
+    // 按 lsn 顺序重放所有仍然保留的日志段。
+    const segments = [...this.walSegments].sort(
+      (a, b) => (a.records[0]?.lsn ?? Number.MAX_SAFE_INTEGER) - (b.records[0]?.lsn ?? Number.MAX_SAFE_INTEGER),
+    );
+    const records: WalRecord[] = [];
+    for (const segment of segments) {
+      if (segment.records.length === 0) continue;
+      this.emit({
+        type: 'WAL_REPLAY',
+        segmentId: segment.id,
+        records: segment.records.length,
+        fromLsn: segment.records[0].lsn,
+        toLsn: segment.records[segment.records.length - 1].lsn,
+      });
+      records.push(...segment.records);
+    }
+    records.sort((a, b) => a.lsn - b.lsn);
+
+    this.replaying = true;
+    for (const r of records) {
+      const at = this.memtable.findIndex((e) => e.key === r.key);
+      const entry: Entry = { key: r.key, row: r.row, tombstone: r.op === 'delete' };
+      if (at >= 0) this.memtable[at] = entry;
+      else insertSorted(this.memtable, entry);
+      this.emit({
+        type: 'MEMTABLE_PUT',
+        key: r.key,
+        row: entry.row ? structuredClone(entry.row) : null,
+        tombstone: entry.tombstone,
+        entries: this.memtable.length,
+        limit: this.config.memtableLimit,
+        overwrite: at >= 0,
+      });
+    }
+    this.replaying = false;
+
+    const restoredKeys = this.memtable.length;
+    // 重放出来的 MemTable 立刻落盘，然后旧日志才能安全丢弃。
+    let flushedTo: string | null = null;
+    if (this.memtable.length > 0) {
+      const tableId = `mem-${this.nextMemtableId++}`;
+      this.emit({
+        type: 'MEMTABLE_FREEZE',
+        tableId,
+        entries: this.memtable.map((e) => ({
+          key: e.key,
+          row: e.row ? structuredClone(e.row) : null,
+          tombstone: e.tombstone,
+        })),
+      });
+      const entries = this.memtable;
+      this.memtable = [];
+      flushedTo = this.createSst(entries, 0, 'flush').id;
+    }
+    for (const segment of [...this.walSegments]) {
+      this.emit({
+        type: 'WAL_TRUNCATE',
+        segmentId: segment.id,
+        records: segment.records.length,
+        bytes: segment.bytes,
+        reason: 'recovered',
+      });
+    }
+    this.walSegments = [];
+    this.currentWal();
+
+    this.emit({
+      type: 'RECOVER_END',
+      replayedRecords: records.length,
+      restoredKeys,
+      flushedToSst: flushedTo,
+    });
+    if (this.config.backgroundCompaction) this.scheduleCompactions();
+
+    return `崩溃丢失内存中的 ${lostMemtable + lostImmutable} 份数据结构，重放 ${records.length} 条 WAL 还原 ${restoredKeys} 个键${
+      flushedTo ? `并落成 ${flushedTo}` : ''
+    }`;
   }
 
   // ——— 读路径 ————————————————————————————————————————————
@@ -465,6 +844,9 @@ export class LsmEngine implements StorageEngine {
    *
    * 顺序就是「新 → 旧」：MemTable → 冻结的 MemTable → L0（新文件在前）→ L1 → L2…
    * 每读一个文件之前先问布隆过滤器，它说「一定没有」就整个文件跳过。
+   *
+   * 注意冻结队列在后台模式下可能排着好几个还没落盘的表 —— 它们也必须被读到，
+   * 否则刚写完的数据在刷盘完成前会「查不到」。
    */
   private get(key: Key): string {
     this.ensureTable();
@@ -699,7 +1081,7 @@ export class LsmEngine implements StorageEngine {
   private projectLsm(): StructuralLsm {
     return {
       memtable: this.memtable.map((e) => ({ key: e.key, tombstone: e.tombstone })),
-      immutable: this.immutable.map((t) => ({ id: t.id, entries: t.entries.length })),
+      immutable: this.immutable.map((t) => ({ id: t.id, keys: t.entries.map((e) => e.key) })),
       levels: this.levels.map((level) =>
         level.map((s) => ({
           id: s.id,
@@ -710,12 +1092,29 @@ export class LsmEngine implements StorageEngine {
           tombstones: s.entries.filter((e) => e.tombstone).map((e) => e.key),
         })),
       ),
+      wal: this.walSegments.map((s) => ({
+        id: s.id,
+        sealed: s.sealed,
+        records: s.records.length,
+        memtableId: s.memtableId,
+      })),
+      bgQueue: this.bgQueue.map((j) => ({ id: j.id, kind: j.kind, level: j.level })),
     };
   }
 
   /** 仅供测试：当前逻辑上存在的全部键。 */
   liveKeys(): Key[] {
     return this.mergedView().map((e) => e.key);
+  }
+
+  /** 仅供测试：还没落盘、只靠 WAL 兜底的记录数。 */
+  walRecordCount(): number {
+    return this.walSegments.reduce((n, s) => n + s.records.length, 0);
+  }
+
+  /** 仅供测试：当前后台积压深度。 */
+  backlog(): number {
+    return this.bgQueue.length;
   }
 
   /** 仅供测试：某个键当前的值（走与 get 相同的层级顺序，但不产生事件）。 */

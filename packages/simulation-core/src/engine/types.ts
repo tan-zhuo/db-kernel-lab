@@ -64,6 +64,21 @@ export interface EngineConfig {
   bloomBitsPerKey: number;
   /** 压实策略：leveled（读放大低、写放大高）vs tiered（相反）。 */
   compactionStyle: 'leveled' | 'tiered';
+  /**
+   * 刷写与压实是否走后台任务队列。
+   *
+   * `true` = 真实行为：写路径只把 MemTable 冻结、往队列里塞一个任务就返回，
+   * 真正的刷盘/压实由「后台线程」在命令间隙推进。压实追不上写入时任务会积压，
+   * 积压到阈值就**写停顿**。
+   * `false` = 教学用的同步模式：写路径当场把活全干完，永远没有积压，便于对照。
+   */
+  backgroundCompaction: boolean;
+  /** 每条命令结束时后台最多推进几个任务（相当于后台线程的吞吐）。 */
+  maxBackgroundJobs: number;
+  /** 已冻结但还没刷盘的 MemTable 上限；超过就写停顿，等一个刷盘做完。 */
+  maxImmutableMemtables: number;
+  /** L0 文件数达到它就写停顿（对应 RocksDB 的 level0_stop_writes_trigger）。 */
+  l0StopTrigger: number;
 }
 
 export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
@@ -85,6 +100,10 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   levelFanout: 4,
   bloomBitsPerKey: 10,
   compactionStyle: 'leveled',
+  backgroundCompaction: true,
+  maxBackgroundJobs: 2,
+  maxImmutableMemtables: 2,
+  l0StopTrigger: 8,
 };
 
 /** 用户级命令：worker 的输入单元，也是会话持久化的最小单位。 */
@@ -124,7 +143,16 @@ export type Command =
   | { kind: 'use_session'; session: string }
   // —— Phase 3：LSM 的手动刷写与压实 ——
   | { kind: 'flush_memtable' }
-  | { kind: 'compact'; level?: number };
+  | { kind: 'compact'; level?: number }
+  /** 手动推进后台任务队列（相当于「给后台线程一点 CPU」）。 */
+  | { kind: 'run_background'; jobs?: number }
+  /**
+   * 模拟进程崩溃并从 WAL 恢复。
+   *
+   * MemTable 与冻结队列都在内存里，崩溃后一起消失；只有已经落成 SST 的部分还在磁盘上。
+   * 恢复靠重放 WAL —— 这正是「为什么写之前必须先写日志」的唯一实证。
+   */
+  | { kind: 'crash' };
 
 /**
  * 存储引擎统一接口（纯前端，全部在 Worker 内执行）。

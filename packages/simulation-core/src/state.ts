@@ -273,6 +273,25 @@ export interface SstState {
   compacting: boolean;
 }
 
+/** 一个 WAL 段：生命周期与一个 MemTable 绑定，那份数据落成 SST 后它就被回收。 */
+export interface WalSegmentState {
+  id: string;
+  records: { lsn: number; op: 'put' | 'delete'; key: Key }[];
+  bytes: number;
+  sealed: boolean;
+  /** 封口时绑定的 MemTable id；未封口为 null。 */
+  memtableId: string | null;
+}
+
+/** 后台任务：刷写或压实。排在队列里的长度就是「压实债务」。 */
+export interface BgJobState {
+  id: number;
+  kind: 'flush' | 'compaction';
+  level: number;
+  reason: string;
+  scheduledAtSeq: number;
+}
+
 export interface LsmProbe {
   sstId: string;
   level: number;
@@ -283,12 +302,37 @@ export interface LsmProbe {
 
 export interface LsmState {
   memtable: { entries: SstEntryState[]; limit: number };
-  /** 已冻结、等待刷盘的 MemTable。 */
-  immutable: { id: string; entries: number }[];
+  /** 已冻结、等待刷盘的 MemTable。后台跟不上时这里会排队，里面的数据依然读得到。 */
+  immutable: { id: string; entries: SstEntryState[] }[];
   ssts: Record<string, SstState>;
   /** levels[i] = 第 i 层的 SST id，按键区间升序（L0 例外：按新旧排列）。 */
   levels: string[][];
-  wal: { records: number; bytes: number; lsn: number };
+  /**
+   * 预写日志。`segments` 里是**当前仍需保留**的段 —— 对应数据一旦落成 SST 就会被回收，
+   * 所以它的长度直接回答了「崩溃的话要重放多少」。
+   */
+  wal: {
+    segments: WalSegmentState[];
+    records: number;
+    bytes: number;
+    lsn: number;
+    truncatedRecords: number;
+    truncatedBytes: number;
+  };
+  /** 后台任务队列（刷写 / 压实）。 */
+  bgQueue: BgJobState[];
+  /** 历史最大积压深度。 */
+  maxQueueDepth: number;
+  stalls: number;
+  lastStall: {
+    reason: 'immutable-full' | 'l0-stop';
+    l0Files: number;
+    immutableTables: number;
+    queueDepth: number;
+    note: string;
+  } | null;
+  crashes: number;
+  lastRecovery: { replayedRecords: number; restoredKeys: number; flushedToSst: string | null } | null;
   /** 最近一次读取的探测轨迹。 */
   probes: LsmProbe[];
   lastGet: {
@@ -410,7 +454,13 @@ export function createLsmState(limit: number): LsmState {
     immutable: [],
     ssts: {},
     levels: [],
-    wal: { records: 0, bytes: 0, lsn: 0 },
+    wal: { segments: [], records: 0, bytes: 0, lsn: 0, truncatedRecords: 0, truncatedBytes: 0 },
+    bgQueue: [],
+    maxQueueDepth: 0,
+    stalls: 0,
+    lastStall: null,
+    crashes: 0,
+    lastRecovery: null,
     probes: [],
     lastGet: null,
     activeCompaction: null,
@@ -1185,10 +1235,92 @@ export function applyEvent(state: LabState, e: SimulationEvent): LabState {
     // ══ Phase 3：LSM-Tree ══════════════════════════════════
     case 'WAL_APPEND': {
       const l = lsm(state);
+      let segment = l.wal.segments.find((seg) => seg.id === e.segmentId);
+      if (!segment) {
+        segment = { id: e.segmentId, records: [], bytes: 0, sealed: false, memtableId: null };
+        l.wal.segments.push(segment);
+      }
+      segment.records.push({ lsn: e.lsn, op: e.op, key: e.key });
+      segment.bytes += e.bytes;
       l.wal.records++;
       l.wal.bytes += e.bytes;
       l.wal.lsn = e.lsn;
       m.walBytes += e.bytes;
+      break;
+    }
+    case 'WAL_SEAL': {
+      const l = lsm(state);
+      const segment = l.wal.segments.find((seg) => seg.id === e.segmentId);
+      if (segment) {
+        segment.sealed = true;
+        segment.memtableId = e.memtableId;
+      }
+      // 后续写入转入新段
+      if (!l.wal.segments.some((seg) => seg.id === e.nextSegmentId)) {
+        l.wal.segments.push({ id: e.nextSegmentId, records: [], bytes: 0, sealed: false, memtableId: null });
+      }
+      break;
+    }
+    case 'WAL_TRUNCATE': {
+      const l = lsm(state);
+      l.wal.segments = l.wal.segments.filter((seg) => seg.id !== e.segmentId);
+      l.wal.truncatedRecords += e.records;
+      l.wal.truncatedBytes += e.bytes;
+      break;
+    }
+    case 'CRASH': {
+      const l = lsm(state);
+      // MemTable、冻结队列、后台任务都在内存里，崩溃后一起没了；SST 与 WAL 在磁盘上还在。
+      l.memtable.entries = [];
+      l.immutable = [];
+      l.bgQueue = [];
+      l.probes = [];
+      l.activeCompaction = null;
+      l.crashes++;
+      state.lastStructuralSeq = e.seq;
+      break;
+    }
+    case 'WAL_REPLAY':
+      break;
+    case 'RECOVER_END': {
+      const l = lsm(state);
+      l.lastRecovery = {
+        replayedRecords: e.replayedRecords,
+        restoredKeys: e.restoredKeys,
+        flushedToSst: e.flushedToSst,
+      };
+      state.lastStructuralSeq = e.seq;
+      break;
+    }
+    case 'BG_JOB_SCHEDULED': {
+      const l = lsm(state);
+      l.bgQueue.push({
+        id: e.jobId,
+        kind: e.kind,
+        level: e.level,
+        reason: e.reason,
+        scheduledAtSeq: e.seq,
+      });
+      l.maxQueueDepth = Math.max(l.maxQueueDepth, l.bgQueue.length);
+      break;
+    }
+    case 'BG_JOB_RUN': {
+      const l = lsm(state);
+      const at = l.bgQueue.findIndex((j) => j.id === e.jobId);
+      if (at >= 0) l.bgQueue.splice(at, 1);
+      break;
+    }
+    case 'WRITE_STALL': {
+      const l = lsm(state);
+      l.stalls++;
+      l.lastStall = {
+        reason: e.reason,
+        l0Files: e.l0Files,
+        immutableTables: e.immutableTables,
+        queueDepth: e.queueDepth,
+        note: e.note,
+      };
+      state.lastStructuralSeq = e.seq;
       break;
     }
     case 'MEMTABLE_PUT': {
@@ -1205,7 +1337,10 @@ export function applyEvent(state: LabState, e: SimulationEvent): LabState {
     }
     case 'MEMTABLE_FREEZE': {
       const l = lsm(state);
-      l.immutable.push({ id: e.tableId, entries: e.entries });
+      l.immutable.push({
+        id: e.tableId,
+        entries: e.entries.map((x) => ({ key: x.key, row: x.row, tombstone: x.tombstone })),
+      });
       l.memtable.entries = [];
       state.lastStructuralSeq = e.seq;
       break;
@@ -1357,8 +1492,12 @@ export interface StructuralPage {
 /** LSM 的结构投影：只比较「文件里有哪些键、是不是墓碑」，不比较行内容。 */
 export interface StructuralLsm {
   memtable: { key: Key; tombstone: boolean }[];
-  immutable: { id: string; entries: number }[];
+  immutable: { id: string; keys: Key[] }[];
   levels: { id: string; level: number; minKey: Key; maxKey: Key; keys: Key[]; tombstones: Key[] }[][];
+  /** 仍需保留的 WAL 段（对应数据还没落成 SST）。 */
+  wal: { id: string; sealed: boolean; records: number; memtableId: string | null }[];
+  /** 待执行的后台任务。 */
+  bgQueue: { id: number; kind: 'flush' | 'compaction'; level: number }[];
 }
 
 export interface StructuralIndex {
@@ -1393,7 +1532,7 @@ export interface StructuralSnapshot {
 export function projectLsm(lsmState: LsmState): StructuralLsm {
   return {
     memtable: lsmState.memtable.entries.map((e) => ({ key: e.key, tombstone: e.tombstone })),
-    immutable: lsmState.immutable.map((t) => ({ id: t.id, entries: t.entries })),
+    immutable: lsmState.immutable.map((t) => ({ id: t.id, keys: t.entries.map((e) => e.key) })),
     levels: lsmState.levels.map((ids) =>
       ids
         .map((id) => lsmState.ssts[id])
@@ -1407,6 +1546,13 @@ export function projectLsm(lsmState: LsmState): StructuralLsm {
           tombstones: s.entries.filter((e) => e.tombstone).map((e) => e.key),
         })),
     ),
+    wal: lsmState.wal.segments.map((seg) => ({
+      id: seg.id,
+      sealed: seg.sealed,
+      records: seg.records.length,
+      memtableId: seg.memtableId,
+    })),
+    bgQueue: lsmState.bgQueue.map((j) => ({ id: j.id, kind: j.kind, level: j.level })),
   };
 }
 
@@ -1596,6 +1742,9 @@ export function spaceAmplification(l: LsmState): number {
   }
   // 从最新到最旧扫一遍，第一次见到的键才算「活」的。
   for (const e of l.memtable.entries) if (!e.tombstone) live.add(e.key);
+  for (let i = l.immutable.length - 1; i >= 0; i--) {
+    for (const e of l.immutable[i].entries) if (!e.tombstone) live.add(e.key);
+  }
   for (const level of l.levels) {
     for (const id of level) {
       const sst = l.ssts[id];
@@ -1613,6 +1762,10 @@ export function lsmLiveKeys(l: LsmState): Key[] {
     if (!seen.has(e.key)) seen.set(e.key, !e.tombstone);
   };
   for (const e of l.memtable.entries) consider(e);
+  // 冻结但还没刷盘的表也是「活」数据：后台积压时它们可能排很久。
+  for (let i = l.immutable.length - 1; i >= 0; i--) {
+    for (const e of l.immutable[i].entries) consider(e);
+  }
   for (const level of l.levels) {
     for (const id of level) {
       const sst = l.ssts[id];

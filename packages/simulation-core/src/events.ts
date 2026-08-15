@@ -259,7 +259,68 @@ export type SimulationEventBody =
   | { type: 'BLOAT_STAT'; liveTuples: number; deadTuples: number; heapPages: number }
 
   // ══ Phase 3：LSM-Tree ═════════════════════════════════════
-  | { type: 'WAL_APPEND'; lsn: number; op: 'put' | 'delete'; key: Key; bytes: number }
+  /**
+   * WAL 追加。**先写日志再改内存**，所以它必定排在同一次写入的 `MEMTABLE_PUT` 之前。
+   * 记录进的是当前那个 WAL 段（`segmentId`），段的生命周期与一个 MemTable 绑定。
+   */
+  | { type: 'WAL_APPEND'; lsn: number; op: 'put' | 'delete'; key: Key; bytes: number; segmentId: string }
+  /** MemTable 冻结时把当前 WAL 段封口，并开一个新段承接后续写入。 */
+  | { type: 'WAL_SEAL'; segmentId: string; memtableId: string; records: number; bytes: number; nextSegmentId: string }
+  /**
+   * WAL 段被回收。
+   *
+   * 触发时机是「它对应的 MemTable 已经落成 SST」—— 数据进了磁盘，日志就没用了。
+   * 这条事件是 WAL **不会无限增长**的唯一原因，也是「WAL 只保住还没落盘的那部分」这条不变式的体现。
+   */
+  | { type: 'WAL_TRUNCATE'; segmentId: string; records: number; bytes: number; reason: 'flushed' | 'recovered' }
+  /** 模拟进程崩溃：内存里的 MemTable 与冻结队列全部丢失，只剩磁盘上的 SST 与 WAL。 */
+  | {
+      type: 'CRASH';
+      lostMemtableEntries: number;
+      lostImmutableTables: number;
+      lostBackgroundJobs: number;
+      retainedWalRecords: number;
+      survivingSsts: number;
+    }
+  /** 重放一个 WAL 段，把丢失的数据装回 MemTable。 */
+  | { type: 'WAL_REPLAY'; segmentId: string; records: number; fromLsn: number; toLsn: number }
+  | { type: 'RECOVER_END'; replayedRecords: number; restoredKeys: number; flushedToSst: string | null }
+
+  // —— 后台任务队列（刷写 / 压实都不在写路径上做）——
+  | {
+      type: 'BG_JOB_SCHEDULED';
+      jobId: number;
+      kind: 'flush' | 'compaction';
+      level: number;
+      reason: string;
+      /** 入队后的积压深度 —— 这就是「压实债务」。 */
+      queueDepth: number;
+    }
+  | {
+      type: 'BG_JOB_RUN';
+      jobId: number;
+      kind: 'flush' | 'compaction';
+      level: number;
+      /** 从入队到真正执行之间隔了多少个事件，反映后台追得有多吃力。 */
+      waitedSeq: number;
+      queueDepth: number;
+      /** 是否是被写停顿逼着在写路径上同步跑的。 */
+      forced: boolean;
+    }
+  /**
+   * 写停顿：写入跑得比后台快，只能让写路径停下来等。
+   *
+   * 这是 LSM 最著名的运维现象。真实 RocksDB 还有一档「限速」（soft slowdown），
+   * 那需要墙钟才能表达，本仿真只建模硬停顿。
+   */
+  | {
+      type: 'WRITE_STALL';
+      reason: 'immutable-full' | 'l0-stop';
+      l0Files: number;
+      immutableTables: number;
+      queueDepth: number;
+      note: string;
+    }
   | {
       type: 'MEMTABLE_PUT';
       key: Key;
@@ -270,7 +331,13 @@ export type SimulationEventBody =
       /** 覆盖同一个键时为 true —— LSM 的「更新」就是再写一条新版本。 */
       overwrite: boolean;
     }
-  | { type: 'MEMTABLE_FREEZE'; tableId: string; entries: number }
+  /**
+   * MemTable 冻结成不可变表。
+   *
+   * **必须带上全部条目**：后台模式下它可能在队列里排很久才落盘，
+   * 这段时间里这些数据是真实存在、也读得到的 —— 只带条数会让它们从可视化里凭空消失。
+   */
+  | { type: 'MEMTABLE_FREEZE'; tableId: string; entries: { key: Key; row: Row | null; tombstone: boolean }[] }
   | {
       type: 'SST_CREATE';
       sstId: string;
@@ -370,6 +437,14 @@ export const EVENT_CATEGORY: Record<SimulationEventType, EventCategory> = {
   BLOAT_STAT: 'meta',
 
   WAL_APPEND: 'lsm',
+  WAL_SEAL: 'lsm',
+  WAL_TRUNCATE: 'lsm',
+  CRASH: 'lsm',
+  WAL_REPLAY: 'lsm',
+  RECOVER_END: 'lsm',
+  BG_JOB_SCHEDULED: 'lsm',
+  BG_JOB_RUN: 'lsm',
+  WRITE_STALL: 'lsm',
   MEMTABLE_PUT: 'record',
   MEMTABLE_FREEZE: 'lsm',
   SST_CREATE: 'lsm',
@@ -456,6 +531,14 @@ export const EVENT_DURATION: Record<SimulationEventType, number> = {
   BLOAT_STAT: 60,
 
   WAL_APPEND: 60,
+  WAL_SEAL: 160,
+  WAL_TRUNCATE: 200,
+  CRASH: 900,
+  WAL_REPLAY: 420,
+  RECOVER_END: 600,
+  BG_JOB_SCHEDULED: 90,
+  BG_JOB_RUN: 220,
+  WRITE_STALL: 520,
   MEMTABLE_PUT: 140,
   MEMTABLE_FREEZE: 420,
   SST_CREATE: 460,
@@ -487,6 +570,10 @@ export const KEYFRAME_EVENTS: ReadonlySet<SimulationEventType> = new Set<Simulat
   'SST_CREATE',
   'COMPACTION_END',
   'LSM_GET_RESULT',
+  'WRITE_STALL',
+  'CRASH',
+  'RECOVER_END',
+  'WAL_TRUNCATE',
 ]);
 
 /** 人类可读的一行事件描述，供事件日志与时间轴 tooltip 使用。 */
@@ -607,11 +694,33 @@ export function describeEvent(e: SimulationEvent): string {
       return `表统计：活 ${e.liveTuples} / 死 ${e.deadTuples}，堆页 ${e.heapPages}`;
 
     case 'WAL_APPEND':
-      return `WAL 追加 lsn=${e.lsn}（${e.op} key=${e.key}，${e.bytes} B）`;
+      return `WAL 追加 lsn=${e.lsn} @ ${e.segmentId}（${e.op} key=${e.key}，${e.bytes} B）`;
+    case 'WAL_SEAL':
+      return `WAL 段 ${e.segmentId} 封口（${e.records} 条 / ${e.bytes} B，绑定 ${e.memtableId}），新写入转入 ${e.nextSegmentId}`;
+    case 'WAL_TRUNCATE':
+      return `回收 WAL 段 ${e.segmentId}（${e.records} 条 / ${e.bytes} B）：${
+        e.reason === 'flushed' ? '对应数据已落成 SST，日志不再需要' : '恢复完成后丢弃旧日志'
+      }`;
+    case 'CRASH':
+      return `💥 进程崩溃：内存里的 ${e.lostMemtableEntries} 条 MemTable 记录 + ${e.lostImmutableTables} 个冻结表 + ${e.lostBackgroundJobs} 个后台任务全部丢失；磁盘上还剩 ${e.survivingSsts} 个 SST 与 ${e.retainedWalRecords} 条 WAL`;
+    case 'WAL_REPLAY':
+      return `重放 WAL 段 ${e.segmentId}：${e.records} 条（lsn ${e.fromLsn}–${e.toLsn}）`;
+    case 'RECOVER_END':
+      return `恢复完成：重放 ${e.replayedRecords} 条日志、还原 ${e.restoredKeys} 个键${
+        e.flushedToSst ? `，并立即落成 ${e.flushedToSst}` : ''
+      }`;
+    case 'BG_JOB_SCHEDULED':
+      return `后台任务入队 #${e.jobId}（${e.kind === 'flush' ? '刷写' : `压实 L${e.level}`}）：${e.reason} —— 积压 ${e.queueDepth}`;
+    case 'BG_JOB_RUN':
+      return `后台任务执行 #${e.jobId}（${e.kind === 'flush' ? '刷写' : `压实 L${e.level}`}）${
+        e.forced ? '【被写停顿逼着同步跑】' : ''
+      }，等待了 ${e.waitedSeq} 个事件，剩余积压 ${e.queueDepth}`;
+    case 'WRITE_STALL':
+      return `⚠ 写停顿（${e.reason === 'immutable-full' ? '冻结队列满' : 'L0 文件过多'}）：${e.note}`;
     case 'MEMTABLE_PUT':
       return `MemTable 写入 key=${e.key}${e.tombstone ? '（墓碑）' : ''}${e.overwrite ? '（覆盖旧版本）' : ''} — ${e.entries}/${e.limit}`;
     case 'MEMTABLE_FREEZE':
-      return `MemTable 冻结为 ${e.tableId}（${e.entries} 条），等待刷成 SST`;
+      return `MemTable 冻结为 ${e.tableId}（${e.entries.length} 条），等待刷成 SST`;
     case 'SST_CREATE':
       return `生成 SST ${e.sstId} @ L${e.level}：${e.entries.length} 条 [${e.minKey}, ${e.maxKey}]（${e.source === 'flush' ? '刷写' : '压实'}）`;
     case 'SST_DROP':

@@ -159,6 +159,72 @@ test('LSM：删除写墓碑，SST 检查器里能看到它', async ({ page }) =>
   await expect(page.getByText(/写墓碑|墓碑/).first()).toBeVisible();
 });
 
+test('LSM：刷写与压实不在写路径上，积压可见且能手动推进', async ({ page }) => {
+  const errors = collectErrors(page);
+  await page.goto('/');
+  await waitForReady(page);
+  await switchEngine(page, 'lsm-tree', /LSM-Tree \(RocksDB-like\)/);
+
+  // 引导实验⑨ 把后台任务上限调成 0：写路径只排队、一个 SST 都不生成
+  await page.getByTestId('scenario-lsm-background').click();
+  await expect(page.getByText(/后台任务入队/).first()).toBeVisible({ timeout: 30_000 });
+  await page.getByTitle('跳到结尾 (End)').click();
+
+  await expect(page.getByTestId('bg-backlog')).not.toHaveText(/^0/);
+  await expect(statValue(page, 'SST 文件')).toHaveText('0');
+
+  // 给后台一点 CPU，活才真的干掉
+  await page.getByTestId('run-background').click();
+  await page.getByTitle('跳到结尾 (End)').click();
+  await expect(page.getByTestId('bg-backlog')).toHaveText(/^0/);
+  await expect(statValue(page, 'SST 文件')).not.toHaveText('0');
+  expect(errors).toEqual([]);
+});
+
+test('LSM：写入跑赢压实就会写停顿', async ({ page }) => {
+  await page.goto('/');
+  await waitForReady(page);
+  await switchEngine(page, 'lsm-tree', /LSM-Tree \(RocksDB-like\)/);
+
+  await page.getByTestId('scenario-lsm-write-stall').click();
+  await expect(page.getByText(/写停顿/).first()).toBeVisible({ timeout: 40_000 });
+  await page.getByTitle('跳到结尾 (End)').click();
+
+  await expect(statValue(page, '写停顿').first()).not.toHaveText('0');
+  // 停顿只是变慢，数据一条不能少
+  await expect(statValue(page, '行数')).toHaveText('40');
+});
+
+test('LSM：崩溃后靠 WAL 把内存里的数据全部还原', async ({ page }) => {
+  const errors = collectErrors(page);
+  await page.goto('/');
+  await waitForReady(page);
+  await switchEngine(page, 'lsm-tree', /LSM-Tree \(RocksDB-like\)/);
+
+  await page.getByTestId('scenario-lsm-crash-recovery').click();
+  await expect(page.getByText(/恢复完成/).first()).toBeVisible({ timeout: 40_000 });
+  await page.getByTitle('跳到结尾 (End)').click();
+
+  await expect(page.getByText(/进程崩溃/).first()).toBeVisible();
+  // 崩溃前写的 10 个键一个不少
+  await expect(statValue(page, '行数')).toHaveText('10');
+  await expect(page.getByText(/上次恢复：重放 10 条日志/)).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test('LSM：数据落盘后 WAL 段被回收，不会无限增长', async ({ page }) => {
+  await page.goto('/');
+  await waitForReady(page);
+  await switchEngine(page, 'lsm-tree', /LSM-Tree \(RocksDB-like\)/);
+  await bulkInsert(page, 12);
+
+  // 手动刷干净：所有数据进 SST，WAL 里就不该再有待恢复的记录
+  await page.getByTestId('flush-memtable').click();
+  await page.getByTitle('跳到结尾 (End)').click();
+  await expect(page.getByTestId('wal-retained')).toHaveText('0 条待恢复');
+  await expect(page.getByText(/已回收 \d+ 条/)).toBeVisible();
+});
+
 test('会话持久化：刷新后仍然停在换过的引擎上', async ({ page }) => {
   await page.goto('/');
   await waitForReady(page);

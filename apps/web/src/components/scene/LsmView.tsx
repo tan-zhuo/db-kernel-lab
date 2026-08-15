@@ -107,7 +107,9 @@ export function LsmView() {
 
   return (
     <group>
+      <WalStrip layout={layout} />
       <MemtableBox layout={layout} />
+      <BacklogBoxes layout={layout} />
 
       <instancedMesh
         key={`lsm-bricks-${capacity}`}
@@ -120,6 +122,74 @@ export function LsmView() {
       </instancedMesh>
 
       {showLabels && <LevelLabels layout={layout} />}
+    </group>
+  );
+}
+
+/**
+ * WAL 条带：画在 MemTable 正上方，因为写入的第一站就是它。
+ *
+ * 这里只画**仍需保留**的段 —— 数据一落成 SST，对应的段就被回收、条带随之缩短。
+ * 所以条带长度直接回答了「现在崩溃的话要重放多少」。青色是正在写入的段，
+ * 琥珀色是已封口、等着它那份数据落盘的段。
+ */
+function WalStrip({ layout }: { layout: LsmLayout }) {
+  const geometry = useMemo(() => new THREE.BoxGeometry(1, 1, 1), []);
+  if (layout.wal.length === 0) return null;
+  return (
+    <group>
+      {layout.wal.map((seg) => (
+        <mesh key={seg.id} geometry={geometry} position={[seg.x, seg.y, seg.z]} scale={[seg.width, seg.height, seg.depth]}>
+          <meshStandardMaterial
+            color={seg.sealed ? PALETTE.update : PALETTE.memtable}
+            emissive={seg.sealed ? PALETTE.update : PALETTE.memtable}
+            emissiveIntensity={0.18}
+            roughness={0.45}
+            metalness={0.2}
+            transparent
+            opacity={seg.records === 0 ? 0.28 : 0.92}
+          />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+/**
+ * 后台任务积压：每个方块就是一个排队中的刷写/压实任务。
+ * 它们堆在右侧不动，就是「压实债务」最直观的样子 —— 堆得越高，离写停顿越近。
+ */
+function BacklogBoxes({ layout }: { layout: LsmLayout }) {
+  const geometry = useMemo(() => new THREE.BoxGeometry(1, 1, 1), []);
+  const pulse = useRef<THREE.Group>(null);
+
+  useFrame(({ clock }) => {
+    if (!pulse.current) return;
+    // 积压越深脉动越明显，余光里也能察觉「后台在欠债」。
+    const intensity = Math.min(1, layout.bgJobs.length / 6);
+    const s = 1 + Math.sin(clock.elapsedTime * 3) * 0.08 * intensity;
+    pulse.current.scale.setScalar(s);
+  });
+
+  if (layout.bgJobs.length === 0) return null;
+  return (
+    <group ref={pulse}>
+      {layout.bgJobs.map((job) => (
+        <mesh
+          key={job.id}
+          geometry={geometry}
+          position={[job.x, job.y, job.z]}
+          scale={[job.size, job.size, job.size]}
+        >
+          <meshStandardMaterial
+            color={job.kind === 'flush' ? PALETTE.memtable : PALETTE.compacting}
+            emissive={job.kind === 'flush' ? PALETTE.memtable : PALETTE.compacting}
+            emissiveIntensity={0.3}
+            roughness={0.4}
+            metalness={0.3}
+          />
+        </mesh>
+      ))}
     </group>
   );
 }
@@ -175,7 +245,10 @@ function LevelLabels({ layout }: { layout: LsmLayout }) {
   const state = useLabState();
   const geometry = useMemo(() => new THREE.PlaneGeometry(1, 1), []);
   const mem = layout.memtable;
-  const wal = state.lsm?.wal;
+  const l = state.lsm;
+  const retained = l?.wal.segments.reduce((n, seg) => n + seg.records.length, 0) ?? 0;
+  const backlog = l?.bgQueue.length ?? 0;
+  const stalls = l?.stalls ?? 0;
 
   return (
     <group>
@@ -189,15 +262,18 @@ function LevelLabels({ layout }: { layout: LsmLayout }) {
           transparent
           depthWrite={false}
           toneMapped={false}
-          map={labelTexture(`lsm-mem|${mem.entries}|${mem.limit}|${mem.frozen}|${wal?.records ?? 0}`, {
+          map={labelTexture(
+            `lsm-mem|${mem.entries}|${mem.limit}|${mem.frozen}|${retained}|${backlog}|${stalls}`,
+            {
             title: `MEMTABLE ${mem.entries}/${mem.limit}${mem.frozen > 0 ? ` · 冻结 ${mem.frozen}` : ''}`,
-            body: `WAL ${wal?.records ?? 0} 条 · 写入只追加，装满即冻结下沉`,
+            body: `WAL 待恢复 ${retained} 条${backlog > 0 ? ` · 后台积压 ${backlog}` : ''}${stalls > 0 ? ` · 写停顿 ${stalls}` : ''}`,
             titleColor: PALETTE.memtable,
             bodyColor: '#dbe6f5',
             width: 900,
             height: 150,
             fontScale: 0.86,
-          })}
+            },
+          )}
         />
       </mesh>
 

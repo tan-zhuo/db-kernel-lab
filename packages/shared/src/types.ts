@@ -110,7 +110,9 @@ export type CommandKind =
   | 'use_session'
   // Phase 3：LSM-Tree
   | 'flush_memtable'
-  | 'compact';
+  | 'compact'
+  | 'run_background'
+  | 'crash';
 
 /** 列的字节宽度估算，用于页填充率显示（简化模型，见 docs/architecture.md 的“简化点”）。 */
 export function columnWidth(col: ColumnDef): number {

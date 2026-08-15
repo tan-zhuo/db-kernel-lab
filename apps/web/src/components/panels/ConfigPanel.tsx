@@ -191,6 +191,51 @@ export function ConfigPanel() {
               />
             </Field>
             <div className="col-span-2">
+              <label className="flex items-center gap-2 text-[11px] text-mute-300">
+                <input
+                  type="checkbox"
+                  data-testid="cfg-background"
+                  checked={draft.backgroundCompaction}
+                  onChange={(e) => patch({ backgroundCompaction: e.target.checked })}
+                />
+                后台刷写 / 压实（关掉 = 写路径上当场做完，便于对照）
+              </label>
+            </div>
+            <Field label="后台任务上限" hint="每条命令推进几个">
+              <input
+                className="dbkl-input"
+                type="number"
+                data-testid="cfg-max-bg"
+                min={0}
+                max={16}
+                disabled={!draft.backgroundCompaction}
+                value={draft.maxBackgroundJobs}
+                onChange={(e) => patch({ maxBackgroundJobs: Math.min(16, Math.max(0, Number(e.target.value))) })}
+              />
+            </Field>
+            <Field label="冻结队列上限" hint="超过就写停顿">
+              <input
+                className="dbkl-input"
+                type="number"
+                min={1}
+                max={16}
+                disabled={!draft.backgroundCompaction}
+                value={draft.maxImmutableMemtables}
+                onChange={(e) => patch({ maxImmutableMemtables: Math.min(16, Math.max(1, Number(e.target.value))) })}
+              />
+            </Field>
+            <Field label="L0 停写阈值" hint="文件数达到即停写">
+              <input
+                className="dbkl-input"
+                type="number"
+                min={1}
+                max={64}
+                disabled={!draft.backgroundCompaction}
+                value={draft.l0StopTrigger}
+                onChange={(e) => patch({ l0StopTrigger: Math.min(64, Math.max(1, Number(e.target.value))) })}
+              />
+            </Field>
+            <div className="col-span-2">
               <Field label="压实策略" hint="读放大 vs 写放大">
                 <select
                   className="dbkl-input"
