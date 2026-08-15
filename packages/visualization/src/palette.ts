@@ -113,6 +113,19 @@ export interface PaletteShape {
   kvRecordDead: string;
   /** 哈希探测连线：桶 → 记录位置。 */
   kvProbe: string;
+
+  // —— 写时复制 B+ 树 ——
+  /** 当前生效的 meta 页 vs 另一个待写的槽。 */
+  cowMetaActive: string;
+  cowMetaIdle: string;
+  /** 本次写事务刚复制出来的页（复制路径高亮）。 */
+  cowCopied: string;
+  /** 空闲表里等待复用的页。 */
+  cowFree: string;
+  /** 被只读快照钉住、暂时回收不了的旧页。 */
+  cowPinned: string;
+  /** 只读快照标记与它指向旧根的连线。 */
+  cowReader: string;
 }
 
 export type ThemeId = 'deep' | 'slate' | 'warm' | 'light';
@@ -191,6 +204,13 @@ const DEEP: PaletteShape = {
   kvRecordLive: '#2ea043',
   kvRecordDead: '#5c3a38',
   kvProbe: '#f0d264',
+
+  cowMetaActive: '#00b8a3',
+  cowMetaIdle: '#243044',
+  cowCopied: '#f0883e',
+  cowFree: '#3d4757',
+  cowPinned: '#7c5cff',
+  cowReader: '#58a6ff',
 };
 
 /**
@@ -239,6 +259,9 @@ const SLATE: PaletteShape = {
   kvLogSealed: '#5a677d',
   kvLogActive: '#14b8a6',
   kvRecordDead: '#6b4442',
+
+  cowMetaIdle: '#2b3648',
+  cowFree: '#4a5769',
 };
 
 /**
@@ -396,6 +419,13 @@ const LIGHT: PaletteShape = {
   kvRecordLive: '#15803d',
   kvRecordDead: '#c26a63',
   kvProbe: '#b45309',
+
+  cowMetaActive: '#0f766e',
+  cowMetaIdle: '#c3cbd8',
+  cowCopied: '#c2410c',
+  cowFree: '#9aa7b9',
+  cowPinned: '#6d28d9',
+  cowReader: '#1d4ed8',
 };
 
 export const THEMES: Record<ThemeId, PaletteShape> = {

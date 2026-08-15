@@ -74,8 +74,10 @@ export type SimulationEventBody =
       pageType: PageType;
       level: number;
       parentId: PageId | null;
-      /** 新页的初始内容（新建根页时用于携带第一个子指针）。 */
-      init?: { keys?: Key[]; children?: PageId[] };
+      /**
+       * 新页的初始内容（新建根页时携带第一个子指针；写时复制时携带整页副本）。
+       */
+      init?: { keys?: Key[]; rows?: (Row | null)[]; children?: PageId[] };
       /** 堆页专用：文件内的块号（PostgreSQL 的 BlockNumber）。 */
       blockNo?: number;
       /** 堆页专用：该页的行指针容量。 */
@@ -462,7 +464,60 @@ export type SimulationEventBody =
       liveRecords: number;
       deadRecords: number;
       reclaimedBytes: number;
-    };
+    }
+
+  // ══ Phase 4：写时复制 B+ 树（LMDB / 影子页）════════════════
+  /**
+   * 一页被复制成新页。
+   *
+   * 写时复制的全部代价都在这个事件上：改一行要复制**根到叶的整条路径**。
+   * 同一个写事务里同一页只复制一次 —— `copiesInTxn` 就是本事务已复制的页数。
+   */
+  | {
+      type: 'COW_COPY';
+      fromPageId: PageId;
+      toPageId: PageId;
+      pageType: PageType;
+      level: number;
+      reason: string;
+      copiesInTxn: number;
+    }
+  /** 内部页的某个子指针改指到副本上 —— 复制路径时自下而上重新挂链。 */
+  | { type: 'CHILD_REPOINT'; pageId: PageId; slot: number; oldChildId: PageId; newChildId: PageId }
+  | { type: 'WRITE_TXN_BEGIN'; txnId: number; rootId: PageId; readers: number }
+  | {
+      type: 'WRITE_TXN_COMMIT';
+      txnId: number;
+      rootId: PageId;
+      copiedPages: number;
+      /** 这一版退役的旧页。它们要等到没有读者看得见才能进空闲表。 */
+      retiredPages: PageId[];
+      height: number;
+      entries: number;
+    }
+  /**
+   * meta 页翻转 —— **这就是提交**。
+   *
+   * 两个 meta 页轮流写：翻转之前旧版本一个字节都没动过，
+   * 所以崩在任何位置都只有两种结果（整个事务丢失 / 整个事务生效）。
+   * 没有中间态，也就不需要 WAL 与恢复流程。
+   */
+  | {
+      type: 'META_FLIP';
+      slot: 0 | 1;
+      txnId: number;
+      rootId: PageId;
+      prevRootId: PageId | null;
+      height: number;
+      freePages: number;
+      pendingPages: number;
+    }
+  /** 只读快照打开：记下当前根页号，没有锁、没有版本链。 */
+  | { type: 'SNAPSHOT_OPEN'; readerId: string; session: string; txnId: number; rootId: PageId; readers: number }
+  | { type: 'SNAPSHOT_CLOSE'; readerId: string; session: string; txnId: number; readers: number }
+  /** 旧版本的页确认没人看得见了，进空闲表等待复用。 */
+  | { type: 'FREELIST_PUSH'; pageIds: PageId[]; releasedTxns: number[]; txnId: number; freePages: number }
+  | { type: 'FREELIST_POP'; pageId: PageId; txnId: number; remaining: number };
 
 export type SimulationEvent = EventMeta & SimulationEventBody;
 export type SimulationEventType = SimulationEventBody['type'];
@@ -557,6 +612,16 @@ export const EVENT_CATEGORY: Record<SimulationEventType, EventCategory> = {
   HASH_PROBE: 'access',
   MERGE_BEGIN: 'kv',
   MERGE_END: 'kv',
+
+  COW_COPY: 'cow',
+  CHILD_REPOINT: 'structure',
+  WRITE_TXN_BEGIN: 'txn',
+  WRITE_TXN_COMMIT: 'txn',
+  META_FLIP: 'cow',
+  SNAPSHOT_OPEN: 'txn',
+  SNAPSHOT_CLOSE: 'txn',
+  FREELIST_PUSH: 'cow',
+  FREELIST_POP: 'cow',
 };
 
 export type EventCategory =
@@ -571,7 +636,8 @@ export type EventCategory =
   | 'mvcc'
   | 'lsm'
   | 'columnar'
-  | 'kv';
+  | 'kv'
+  | 'cow';
 
 /**
  * 每类事件占用的「逻辑时长」（毫秒）。
@@ -668,6 +734,16 @@ export const EVENT_DURATION: Record<SimulationEventType, number> = {
   HASH_PROBE: 200,
   MERGE_BEGIN: 420,
   MERGE_END: 520,
+
+  COW_COPY: 300,
+  CHILD_REPOINT: 110,
+  WRITE_TXN_BEGIN: 120,
+  WRITE_TXN_COMMIT: 260,
+  META_FLIP: 520,
+  SNAPSHOT_OPEN: 300,
+  SNAPSHOT_CLOSE: 260,
+  FREELIST_PUSH: 200,
+  FREELIST_POP: 90,
 };
 
 /** 时间轴上值得停留的「关键帧」——单步/自动播放会在这些事件上放慢。 */
@@ -698,6 +774,10 @@ export const KEYFRAME_EVENTS: ReadonlySet<SimulationEventType> = new Set<Simulat
   'ZONE_MAP_SKIP',
   'MERGE_END',
   'LOG_FILE_SEAL',
+  'COW_COPY',
+  'META_FLIP',
+  'SNAPSHOT_OPEN',
+  'WRITE_TXN_COMMIT',
 ]);
 
 /** 人类可读的一行事件描述，供事件日志与时间轴 tooltip 使用。 */
@@ -895,6 +975,25 @@ export function describeEvent(e: SimulationEvent): string {
       return `合并开始：${e.inputs.length} 个文件，失效占比 ${(e.deadRatio * 100).toFixed(0)}% —— ${e.reason}`;
     case 'MERGE_END':
       return `合并结束：保留 ${e.liveRecords} 条、丢弃 ${e.deadRecords} 条，回收 ${e.reclaimedBytes} B（${e.inputs.length} → ${e.outputs.length} 个文件）`;
+
+    case 'COW_COPY':
+      return `写时复制：页 #${e.fromPageId} → #${e.toPageId}（${e.pageType === 'leaf' ? '叶子' : '内部'}，第 ${e.level} 层）—— ${e.reason}；本事务已复制 ${e.copiesInTxn} 页`;
+    case 'CHILD_REPOINT':
+      return `子指针改指：页 #${e.pageId} 槽 ${e.slot}：#${e.oldChildId} → #${e.newChildId}`;
+    case 'WRITE_TXN_BEGIN':
+      return `写事务 txn=${e.txnId} 开始（当前根 #${e.rootId}，${e.readers} 个只读快照在跑）—— 同一时刻只允许一个写者`;
+    case 'WRITE_TXN_COMMIT':
+      return `写事务 txn=${e.txnId} 提交：复制 ${e.copiedPages} 页、退役 ${e.retiredPages.length} 页，新根 #${e.rootId}（树高 ${e.height}，${e.entries} 条）`;
+    case 'META_FLIP':
+      return `翻转 meta 页 → 槽 ${e.slot}：根 ${e.prevRootId === null ? '∅' : `#${e.prevRootId}`} → #${e.rootId}，txn=${e.txnId} —— 这一步就是提交，没有 WAL`;
+    case 'SNAPSHOT_OPEN':
+      return `只读快照 ${e.readerId} 打开（会话 ${e.session}）：钉住根 #${e.rootId} / txn=${e.txnId} —— 零加锁，${e.readers} 个读者在跑`;
+    case 'SNAPSHOT_CLOSE':
+      return `只读快照 ${e.readerId} 关闭（会话 ${e.session}，txn=${e.txnId}）—— 还剩 ${e.readers} 个读者`;
+    case 'FREELIST_PUSH':
+      return `${e.pageIds.length} 个旧版本页确认无人可见，进空闲表（现有 ${e.freePages} 页可复用）`;
+    case 'FREELIST_POP':
+      return `从空闲表复用页 #${e.pageId}（剩 ${e.remaining} 页）`;
     default: {
       const never: never = e;
       return JSON.stringify(never);

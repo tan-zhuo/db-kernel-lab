@@ -360,6 +360,8 @@ Phase 0/1 的目标是**语义正确**，不是字节级兼容。已知差异：
    | `btree` | `BTreeView`（B+ 树森林）、索引提示与投影旋钮、阶数/填充因子参数 |
    | `heap` | `HeapView`（堆文件 + 版本链 + 索引→堆弧线）、堆页检查器、堆页容量参数 |
    | `lsm` | `LsmView`（MemTable + 分层 SST）、LSM 面板、SST 检查器、压实参数 |
+   | `cow` | `CowView`（meta 页双缓冲 + 空闲表 / 被钉住的页 + 只读快照）、写时复制面板；同时让 `layoutTree` 隐藏孤立页 |
+   | `snapshot-reader` | 只读快照：读事务只记下当前根页号，不加锁也没有版本链 |
    | `buffer-pool` | `BufferPoolView`、命中率/淘汰/脏页指标、缓冲池参数 |
    | `transactions` | 事务面板（会话切换、BEGIN/COMMIT/ROLLBACK、快照显示） |
    | `mvcc` | 可见性判定列表、膨胀率、HOT 统计 |

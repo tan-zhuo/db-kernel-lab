@@ -26,7 +26,10 @@ export type EngineCapability =
   | 'zone-map'
   | 'vectorized'
   | 'kv'
-  | 'hash-index';
+  | 'hash-index'
+  // Phase 4：写时复制 B+ 树（LMDB 风格）
+  | 'cow'
+  | 'snapshot-reader';
 
 export interface EngineConfig {
   /** B+ 树阶数：内部页最多 order 个子指针，叶子页最多 order-1 条记录。 */

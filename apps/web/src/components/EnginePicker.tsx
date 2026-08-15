@@ -16,6 +16,7 @@ export const ENGINE_PRESETS: Record<string, Partial<EngineConfig>> = {
   'lsm-tree': { memtableLimit: 6, l0CompactionTrigger: 3, levelFanout: 3, bloomBitsPerKey: 10 },
   columnar: { rowGroupSize: 12, vectorBatchSize: 4, zoneMaps: true, columnEncoding: 'auto' },
   'kv-hash': { kvLogFileRecords: 6, kvHashBuckets: 12, kvMergeThreshold: 0.4 },
+  'cow-btree': { order: 4, fillFactor: 0.5 },
 };
 
 /** 每个引擎最值得先记住的一句话。 */
@@ -25,6 +26,7 @@ const ENGINE_HOOK: Record<string, string> = {
   'lsm-tree': '写只追加，从不原地改：装满就刷成文件、后台逐层压实；读要自上而下探测。',
   columnar: '数据按列放：同列同质所以压得极狠，查询只读用到的那几列。',
   'kv-hash': '全部键常驻内存哈希表：点查恒定一次寻址，但完全不支持范围扫描。',
+  'cow-btree': '改一行就复制根到叶的整条路径，提交只是翻一下 meta 页：没有 WAL，读者零加锁。',
 };
 
 /**

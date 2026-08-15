@@ -441,6 +441,36 @@ export interface KvState {
   deadRecords: number;
 }
 
+// ——— Phase 4：写时复制 B+ 树 ——————————————————————————
+
+export interface CowReaderState {
+  id: string;
+  session: string;
+  txnId: number;
+  rootId: PageId;
+}
+
+export interface CowState {
+  /** 当前生效的 meta 槽（0/1 轮流写）。 */
+  metaSlot: 0 | 1;
+  meta: { txnId: number; rootId: PageId | null; height: number }[];
+  txnId: number;
+  rootId: PageId | null;
+  /** 可以直接复用的空闲页。 */
+  freelist: PageId[];
+  /** 已退役但被读者占住、暂时回收不了的页 —— LMDB 空间放大的唯一来源。 */
+  pending: { txnId: number; pages: PageId[] }[];
+  readers: CowReaderState[];
+  /** 累计复制过的页数。 */
+  copies: number;
+  /** 从空闲表复用过的页数。 */
+  reused: number;
+  /** 本次写事务复制的路径（页号对），供 3D 高亮。 */
+  lastPath: { from: PageId; to: PageId }[];
+  lastCommit: { txnId: number; copiedPages: number; retiredPages: number } | null;
+  writeTxns: number;
+}
+
 export interface OperatorStat {
   nodeId: string;
   op: string;
@@ -486,6 +516,8 @@ export interface LabState {
   columnar: ColumnarState | null;
   /** 哈希索引 KV 引擎的日志文件与内存索引；其它引擎为 null。 */
   kv: KvState | null;
+  /** 写时复制 B+ 树的 meta 页 / 空闲表 / 只读快照；其它引擎为 null。 */
+  cow: CowState | null;
   /** 最近一次结构性事件的序号，供可视化触发一次性动画。 */
   lastStructuralSeq: number;
   appliedSeq: number;
@@ -519,6 +551,7 @@ export function createInitialState(config: EngineConfig = DEFAULT_ENGINE_CONFIG)
     lsm: null,
     columnar: null,
     kv: null,
+    cow: null,
     lastStructuralSeq: -1,
     appliedSeq: -1,
   };
@@ -563,6 +596,26 @@ export function createLsmState(limit: number): LsmState {
     droppedEntries: 0,
     userWrites: 0,
     entriesWritten: 0,
+  };
+}
+
+export function createCowState(): CowState {
+  return {
+    metaSlot: 0,
+    meta: [
+      { txnId: 0, rootId: null, height: 1 },
+      { txnId: 0, rootId: null, height: 1 },
+    ],
+    txnId: 0,
+    rootId: null,
+    freelist: [],
+    pending: [],
+    readers: [],
+    copies: 0,
+    reused: 0,
+    lastPath: [],
+    lastCommit: null,
+    writeTxns: 0,
   };
 }
 
@@ -620,6 +673,11 @@ function mvcc(state: LabState): MvccState {
 function lsm(state: LabState): LsmState {
   if (!state.lsm) state.lsm = createLsmState(state.config.memtableLimit);
   return state.lsm;
+}
+
+function cow(state: LabState): CowState {
+  if (!state.cow) state.cow = createCowState();
+  return state.cow;
 }
 
 function columnar(state: LabState): ColumnarState {
@@ -793,7 +851,7 @@ export function applyEvent(state: LabState, e: SimulationEvent): LabState {
         level: e.level,
         parentId: e.parentId,
         keys: e.init?.keys?.slice() ?? [],
-        rows: [],
+        rows: e.init?.rows ? structuredClone(e.init.rows) : [],
         children: e.init?.children?.slice() ?? [],
         prev: null,
         next: null,
@@ -1609,6 +1667,70 @@ export function applyEvent(state: LabState, e: SimulationEvent): LabState {
       break;
     }
 
+    // ══ Phase 4：写时复制 B+ 树 ════════════════════════════
+    case 'COW_COPY': {
+      const c = cow(state);
+      c.copies++;
+      c.lastPath.push({ from: e.fromPageId, to: e.toPageId });
+      // 复制路径就是这次写的「下降路径」，直接拿来当高亮用。
+      if (!state.path.includes(e.toPageId)) state.path.push(e.toPageId);
+      state.lastStructuralSeq = e.seq;
+      break;
+    }
+    case 'CHILD_REPOINT': {
+      const p = state.pages[e.pageId];
+      if (p) p.children[e.slot] = e.newChildId;
+      break;
+    }
+    case 'WRITE_TXN_BEGIN': {
+      const c = cow(state);
+      c.txnId = e.txnId;
+      c.lastPath = [];
+      c.writeTxns++;
+      state.path = [];
+      break;
+    }
+    case 'WRITE_TXN_COMMIT': {
+      const c = cow(state);
+      c.lastCommit = { txnId: e.txnId, copiedPages: e.copiedPages, retiredPages: e.retiredPages.length };
+      if (e.retiredPages.length > 0) c.pending.push({ txnId: e.txnId, pages: e.retiredPages.slice() });
+      break;
+    }
+    case 'META_FLIP': {
+      const c = cow(state);
+      c.metaSlot = e.slot;
+      c.meta[e.slot] = { txnId: e.txnId, rootId: e.rootId, height: e.height };
+      c.txnId = e.txnId;
+      c.rootId = e.rootId;
+      state.lastStructuralSeq = e.seq;
+      break;
+    }
+    case 'SNAPSHOT_OPEN': {
+      const c = cow(state);
+      c.readers.push({ id: e.readerId, session: e.session, txnId: e.txnId, rootId: e.rootId });
+      break;
+    }
+    case 'SNAPSHOT_CLOSE': {
+      const c = cow(state);
+      c.readers = c.readers.filter((r) => r.id !== e.readerId);
+      break;
+    }
+    case 'FREELIST_PUSH': {
+      const c = cow(state);
+      c.freelist.push(...e.pageIds);
+      // 事件直接带上了「哪几个事务的旧页被放出来了」，reducer 不用自己推断。
+      c.pending = c.pending.filter((p) => !e.releasedTxns.includes(p.txnId));
+      state.lastStructuralSeq = e.seq;
+      break;
+    }
+    case 'FREELIST_POP': {
+      const c = cow(state);
+      const at = c.freelist.indexOf(e.pageId);
+      if (at >= 0) c.freelist.splice(at, 1);
+      c.reused++;
+      break;
+    }
+
     case 'WRITE_STALL': {
       const l = lsm(state);
       l.stalls++;
@@ -1829,6 +1951,8 @@ export interface StructuralSnapshot {
   columnar?: StructuralColumnar;
   /** 哈希索引 KV 引擎专用。 */
   kv?: StructuralKv;
+  /** 写时复制 B+ 树专用。 */
+  cow?: StructuralCow;
 }
 
 /** 列存的结构投影：行组里每列存了哪些行、用了什么编码、区间统计是多少。 */
@@ -1840,6 +1964,27 @@ export interface StructuralColumnar {
     sealed: boolean;
     chunks: { column: string; rows: number; encoding: string; distinct: number; minValue: Key | null; maxValue: Key | null }[];
   }[];
+}
+
+/** 写时复制的结构投影：meta 槽、空闲表、读者与挂起回收队列。 */
+export interface StructuralCow {
+  metaSlot: 0 | 1;
+  rootId: PageId | null;
+  txnId: number;
+  freelist: PageId[];
+  readers: { id: string; txnId: number; rootId: PageId }[];
+  pending: { txnId: number; pages: PageId[] }[];
+}
+
+export function projectCow(c: CowState): StructuralCow {
+  return {
+    metaSlot: c.metaSlot,
+    rootId: c.rootId,
+    txnId: c.txnId,
+    freelist: c.freelist.slice(),
+    readers: c.readers.map((r) => ({ id: r.id, txnId: r.txnId, rootId: r.rootId })),
+    pending: c.pending.map((p) => ({ txnId: p.txnId, pages: p.pages.slice() })),
+  };
 }
 
 /** KV 的结构投影：日志文件 + 内存索引指向。 */
@@ -1950,6 +2095,7 @@ export function projectStructure(state: LabState): StructuralSnapshot {
     lsm: state.lsm ? projectLsm(state.lsm) : undefined,
     columnar: state.columnar ? projectColumnar(state.columnar) : undefined,
     kv: state.kv ? projectKv(state.kv) : undefined,
+    cow: state.cow ? projectCow(state.cow) : undefined,
   };
 }
 

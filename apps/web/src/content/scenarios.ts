@@ -1,5 +1,6 @@
 import {
   COLUMNAR_ENGINE_ID,
+  COW_BTREE_ENGINE_ID,
   DEFAULT_SCHEMA,
   INNODB_BTREE_ENGINE_ID,
   KV_HASH_ENGINE_ID,
@@ -524,6 +525,91 @@ export const SCENARIOS: Scenario[] = [
     commands: [
       { kind: 'bulk_insert', count: 30, pattern: 'sequential', start: 1 },
       { kind: 'search', key: 21 },
+    ],
+  },
+
+  // ══ 写时复制 B+ 树（LMDB 风格）════════════════════════════
+  {
+    id: 'cow-path',
+    engineId: COW_BTREE_ENGINE_ID,
+    title: '① 改一行要复制整条路径',
+    goal:
+      '先铺 20 行把树长到三层，再改一行：橙色的复制事件会**从根一路数到叶**，' +
+      '正好等于树高。这就是写时复制的全部代价 —— 也是它换来「不需要 WAL」的价钱。',
+    config: { order: 4, fillFactor: 0.5 },
+    commands: [
+      { kind: 'bulk_insert', count: 20, pattern: 'sequential', start: 1 },
+      { kind: 'update', key: 7, row: bumpRow(DEFAULT_SCHEMA, 7, 1) },
+    ],
+  },
+  {
+    id: 'cow-meta-flip',
+    engineId: COW_BTREE_ENGINE_ID,
+    title: '② 提交 = 翻一下 meta 页',
+    goal:
+      '连写三条，盯住树顶那两个 meta 页：亮的那个每次提交换一边。' +
+      '翻转之前旧版本一个字节都没动过 —— 崩在任何位置都只有「整个事务丢失」或「整个事务生效」两种结果，' +
+      '所以这个引擎连恢复流程都不需要。',
+    config: { order: 4 },
+    commands: [
+      { kind: 'bulk_insert', count: 8, pattern: 'sequential', start: 1 },
+      { kind: 'insert', key: 50 },
+      { kind: 'insert', key: 51 },
+      { kind: 'insert', key: 52 },
+    ],
+  },
+  {
+    id: 'cow-batch-amortize',
+    engineId: COW_BTREE_ENGINE_ID,
+    title: '③ 批量写摊薄复制开销',
+    goal:
+      '一个写事务里插 30 行：同一页在事务内**只复制一次**，所以平均每行复制的页数远小于树高。' +
+      '把它和 ① 的单条写并排看 —— 写时复制引擎为什么必须攒批，答案就在这两个数字里。',
+    config: { order: 4 },
+    commands: [{ kind: 'bulk_insert', count: 30, pattern: 'sequential', start: 1 }],
+  },
+  {
+    id: 'cow-snapshot',
+    engineId: COW_BTREE_ENGINE_ID,
+    title: '④ 只读快照：零加锁的一致视图',
+    goal:
+      '会话 A 开一个只读快照（钉住当前根），切到 B 写入并提交，再切回 A 查那个新键 —— 查不到。' +
+      'A 看的那棵树是不可变的历史版本，全程没有加过任何锁，也没有版本链要走。',
+    config: { order: 4 },
+    commands: [
+      { kind: 'bulk_insert', count: 8, pattern: 'sequential', start: 1 },
+      { kind: 'begin_txn' },
+      { kind: 'use_session', session: 'B' },
+      { kind: 'insert', key: 99 },
+      { kind: 'use_session', session: 'A' },
+      { kind: 'search', key: 99 },
+    ],
+  },
+  {
+    id: 'cow-reader-bloat',
+    engineId: COW_BTREE_ENGINE_ID,
+    title: '⑤ 长读事务撑爆空间',
+    goal:
+      '开着快照不放，再反复覆盖 12 个键：右下角那摞紫色的「被钉住的页」只涨不落 ——' +
+      '旧版本没人敢回收。关掉快照，它们立刻回到空闲表。这就是 LMDB 用户最常踩的那个坑。',
+    config: { order: 4 },
+    commands: [
+      { kind: 'bulk_insert', count: 12, pattern: 'sequential', start: 1 },
+      { kind: 'begin_txn' },
+      ...Array.from({ length: 20 }, (_, i) => ({ kind: 'insert', key: (i % 12) + 1 }) as Command),
+    ],
+  },
+  {
+    id: 'cow-no-leaf-link',
+    engineId: COW_BTREE_ENGINE_ID,
+    title: '⑥ 没有叶子链表，扫描要回溯',
+    goal:
+      '全表扫描 40 行：注意叶子之间**没有连线**。链表会让改一个叶子连带复制左右邻居、级联到整层，' +
+      '所以写时复制的树干脆不要它 —— 代价是跨叶子时要沿路径栈爬回父页再钻下来。',
+    config: { order: 4 },
+    commands: [
+      { kind: 'bulk_insert', count: 40, pattern: 'sequential', start: 1 },
+      { kind: 'full_scan' },
     ],
   },
 ];

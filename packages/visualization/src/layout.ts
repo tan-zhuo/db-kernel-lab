@@ -15,6 +15,17 @@ export interface LayoutOptions {
   levelGap: number;
   /** 两棵索引树之间的水平间距。 */
   indexGap: number;
+  /**
+   * 没挂在任何索引树上的页怎么处理。
+   *
+   * `row` = 在树旁边排一行（默认）。对 InnoDB / PostgreSQL 是对的：
+   * 这种页只会在分裂动画的中间态出现，寥寥几个，画出来反而有助于理解。
+   *
+   * `hide` = 不画。写时复制引擎必须用它：那里的「孤立页」是**上一个版本的整棵树**，
+   * 动辄几十上百页，铺成一行会把当前版本挤成一条线 ——
+   * 它们由 `CowView` 单独画成「被钉住的页」那一摞，语义也更准确。
+   */
+  orphanPages: 'row' | 'hide';
 }
 
 export const DEFAULT_LAYOUT: LayoutOptions = {
@@ -25,6 +36,7 @@ export const DEFAULT_LAYOUT: LayoutOptions = {
   siblingGap: 1.1,
   levelGap: 3.4,
   indexGap: 7,
+  orphanPages: 'row',
 };
 
 export interface LayoutNode {
@@ -129,7 +141,7 @@ export function layoutTree(state: LabState, options: Partial<LayoutOptions> = {}
 
   // 尚未挂到任何索引上的页（分裂动画中间态）也要渲染出来。
   // 堆页不属于任何索引树，由 layoutHeap 单独排布在树的下方。
-  for (const key in state.pages) {
+  for (const key in opt.orphanPages === 'hide' ? {} : state.pages) {
     const p = state.pages[key];
     if (placed.has(p.id) || p.type === 'heap') continue;
     const node = makeNode(p.id, state, opt, width, capacity, cursorX + width / 2, p.level * opt.levelGap, false);

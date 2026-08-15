@@ -17,6 +17,7 @@ import { TransactionPanel } from '@/components/panels/TransactionPanel';
 import { LsmPanel } from '@/components/panels/LsmPanel';
 import { ColumnarPanel } from '@/components/panels/ColumnarPanel';
 import { KvPanel } from '@/components/panels/KvPanel';
+import { CowPanel } from '@/components/panels/CowPanel';
 import { Timeline } from '@/components/timeline/Timeline';
 import { Rail, type RailTab } from '@/components/ui/Rail';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
@@ -33,10 +34,13 @@ import { useCapability, usePlaybackDriver, useSimStore } from '@/state/store';
  */
 export function App() {
   const boot = useSimStore((s) => s.boot);
-  const hasTransactions = useCapability('transactions');
+  // 事务面板讲的是 MVCC 那套（版本链 / 快照 / VACUUM），所以按 mvcc 挂而不是 transactions ——
+  // 写时复制引擎也有事务，但它的事务是另一回事，由 CowPanel 自己讲。
+  const hasMvcc = useCapability('mvcc');
   const hasLsm = useCapability('lsm');
   const hasColumnar = useCapability('columnar');
   const hasKv = useCapability('kv');
+  const hasCow = useCapability('cow');
   const hasSecondaryIndex = useCapability('secondary-index');
   // 哈希 KV 只有「按键点查」一条路，查询构造器对它没有意义。
   const hasQuery = !hasKv;
@@ -55,7 +59,7 @@ export function App() {
       render: () => (
         <>
           <OperationsPanel />
-          {hasTransactions && <TransactionPanel />}
+          {hasMvcc && <TransactionPanel />}
           {hasSecondaryIndex && <IndexPanel />}
         </>
       ),
@@ -96,6 +100,7 @@ export function App() {
           {hasLsm && <LsmPanel />}
           {hasColumnar && <ColumnarPanel />}
           {hasKv && <KvPanel />}
+          {hasCow && <CowPanel />}
           <MetricsPanel />
         </>
       ),

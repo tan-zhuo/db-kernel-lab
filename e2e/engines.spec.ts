@@ -289,6 +289,67 @@ test('KV 哈希：覆盖写产生垃圾，合并能回收', async ({ page }) => 
   await expect(page.getByText(/上次合并：保留/)).toBeVisible();
 });
 
+test('写时复制：改一行复制整条路径，提交只是翻 meta 页', async ({ page }) => {
+  const errors = collectErrors(page);
+  await page.goto('/');
+  await waitForReady(page);
+  await switchEngine(page, 'cow-btree', /写时复制/);
+  await bulkInsert(page, 20);
+
+  await openTab(page, 'state');
+  await expect(page.getByTestId('cow-meta-0')).toBeVisible();
+  await expect(page.getByTestId('cow-meta-1')).toBeVisible();
+  await expect(statValue(page, '累计复制页')).not.toHaveText('0');
+
+  // 单条写：复制的页数正好等于树高
+  await openTab(page, 'ops');
+  await page.getByLabel('主键 key').fill('7');
+  await page.getByTestId('op-update').click();
+  await page.getByTitle('跳到结尾 (End)').click();
+  await expectEvent(page, /翻转 meta 页/);
+  await expectEvent(page, /写时复制：页/);
+
+  await openTab(page, 'state');
+  const height = await statValue(page, '树高').innerText();
+  await expect(statValue(page, '上次复制')).toHaveText(height);
+  expect(errors).toEqual([]);
+});
+
+test('写时复制：只读快照看不见后来的写入，且钉住旧页', async ({ page }) => {
+  await page.goto('/');
+  await waitForReady(page);
+  await switchEngine(page, 'cow-btree', /写时复制/);
+
+  await runScenario(page, 'cow-snapshot');
+  await expectEvent(page, /只读快照 r1 打开/, 40_000);
+  await page.getByTitle('跳到结尾 (End)').click();
+
+  // 会话 A 的快照里没有 B 后来插入的 key=99
+  await expectEvent(page, /未找到 key=99|SEARCH/);
+  await openTab(page, 'state');
+  await expect(statValue(page, '只读快照')).toHaveText('1');
+  await expect(statValue(page, '钉住不放')).not.toHaveText('0');
+});
+
+test('写时复制：关掉快照，被钉住的旧页立刻回到空闲表', async ({ page }) => {
+  await page.goto('/');
+  await waitForReady(page);
+  await switchEngine(page, 'cow-btree', /写时复制/);
+
+  await runScenario(page, 'cow-reader-bloat');
+  await expectEvent(page, /写事务 txn=/, 40_000);
+  await page.getByTitle('跳到结尾 (End)').click();
+
+  await openTab(page, 'state');
+  await expect(statValue(page, '钉住不放')).not.toHaveText('0');
+  // 面板显示的是「时间轴游标处」的状态：等回放真的走到结尾，按钮才是「关快照」
+  await expect(page.getByTestId('cow-snapshot')).toHaveText(/关快照/);
+  await page.getByTestId('cow-snapshot').click();
+  await page.getByTitle('跳到结尾 (End)').click();
+  await expect(statValue(page, '钉住不放')).toHaveText('0');
+  await expect(statValue(page, '空闲页')).not.toHaveText('0');
+});
+
 test('会话持久化：刷新后仍然停在换过的引擎上', async ({ page }) => {
   await page.goto('/');
   await waitForReady(page);
