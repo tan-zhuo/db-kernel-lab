@@ -126,6 +126,17 @@ export interface PaletteShape {
   cowPinned: string;
   /** 只读快照标记与它指向旧根的连线。 */
   cowReader: string;
+
+  // —— Bε-树 / 分形树 ——
+  /** 消息缓冲的空槽 vs 已占用。 */
+  bufferEmpty: string;
+  bufferFilled: string;
+  /** 缓冲快满了（下一条就要触发下推）。 */
+  bufferHot: string;
+  /** 刚被下推的那批消息（父 → 子的连线）。 */
+  bufferFlush: string;
+  /** 读路径在缓冲里命中的那一格。 */
+  bufferHit: string;
 }
 
 export type ThemeId = 'deep' | 'slate' | 'warm' | 'light';
@@ -211,6 +222,12 @@ const DEEP: PaletteShape = {
   cowFree: '#3d4757',
   cowPinned: '#7c5cff',
   cowReader: '#58a6ff',
+
+  bufferEmpty: '#1b2434',
+  bufferFilled: '#f0883e',
+  bufferHot: '#f85149',
+  bufferFlush: '#f0d264',
+  bufferHit: '#00b8a3',
 };
 
 /**
@@ -262,6 +279,7 @@ const SLATE: PaletteShape = {
 
   cowMetaIdle: '#2b3648',
   cowFree: '#4a5769',
+  bufferEmpty: '#2b3648',
 };
 
 /**
@@ -426,6 +444,12 @@ const LIGHT: PaletteShape = {
   cowFree: '#9aa7b9',
   cowPinned: '#6d28d9',
   cowReader: '#1d4ed8',
+
+  bufferEmpty: '#d3dae4',
+  bufferFilled: '#c2410c',
+  bufferHot: '#b91c1c',
+  bufferFlush: '#b45309',
+  bufferHit: '#0f766e',
 };
 
 export const THEMES: Record<ThemeId, PaletteShape> = {

@@ -22,6 +22,7 @@ export function ConfigPanel() {
   const hasLsm = useCapability('lsm');
   const hasColumnar = useCapability('columnar');
   const hasKv = useCapability('kv');
+  const hasMessageBuffer = useCapability('message-buffer');
   const hasBufferPool = useCapability('buffer-pool');
   const hasTransactions = useCapability('transactions');
   const [draft, setDraft] = useState<EngineConfig>(config);
@@ -301,6 +302,30 @@ export function ConfigPanel() {
               </label>
             </div>
           </>
+        )}
+
+        {/* —— Bε-树：缓冲容量就是那个 ε 旋钮 —— */}
+        {hasMessageBuffer && (
+          <div className="col-span-2">
+            <Field
+              label="消息缓冲容量"
+              hint={draft.fractalBufferCapacity === 0 ? '0 = 退化成普通 B+ 树' : '越大写越快、读越慢'}
+            >
+              <input
+                className="dbkl-input"
+                type="number"
+                data-testid="cfg-buffer-capacity"
+                min={0}
+                max={64}
+                value={draft.fractalBufferCapacity}
+                onChange={(e) => patch({ fractalBufferCapacity: Math.min(64, Math.max(0, Number(e.target.value))) })}
+              />
+            </Field>
+            <p className="mt-1 text-[10.5px] leading-relaxed text-mute-400/80">
+              这一个数字就是 Bε-树里的 ε：调到 0 写立刻下降到叶子（普通 B+ 树），
+              调得越大写越省、读越贵 —— 一路调下去就越来越像 LSM。
+            </p>
+          </div>
         )}
 
         {/* —— 哈希 KV —— */}

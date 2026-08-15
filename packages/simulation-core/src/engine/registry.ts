@@ -4,6 +4,7 @@ import { LsmEngine } from './lsm-engine';
 import { ColumnarEngine } from './columnar-engine';
 import { KvHashEngine } from './kv-engine';
 import { CowBTreeEngine } from './cow-engine';
+import { FractalTreeEngine } from './fractal-engine';
 import type { EngineConfig, EngineFactory, StorageEngine } from './types';
 
 /**
@@ -39,6 +40,7 @@ export const LSM_ENGINE_ID = 'lsm-tree';
 export const COLUMNAR_ENGINE_ID = 'columnar';
 export const KV_HASH_ENGINE_ID = 'kv-hash';
 export const COW_BTREE_ENGINE_ID = 'cow-btree';
+export const FRACTAL_TREE_ENGINE_ID = 'fractal-tree';
 
 /** 默认引擎：Phase 1 的 InnoDB 聚簇 B+ 树。 */
 export const DEFAULT_ENGINE_ID = INNODB_BTREE_ENGINE_ID;
@@ -89,4 +91,12 @@ registerEngine({
   description: '改一行就复制根到叶的整条路径，提交只是翻一下 meta 页：没有 WAL、不需要恢复、读者零加锁',
   capabilities: ['btree', 'clustered-index', 'cow', 'snapshot-reader', 'transactions'],
   create: (config) => new CowBTreeEngine(config),
+});
+
+registerEngine({
+  id: FRACTAL_TREE_ENGINE_ID,
+  label: 'Bε-树 · 分形树（TokuDB）',
+  description: '写只往根节点的消息缓冲里塞一条，攒够一批再整体下推；读要沿路把每层缓冲翻一遍。它正好落在 B+ 树与 LSM 之间',
+  capabilities: ['btree', 'clustered-index', 'message-buffer', 'write-optimized'],
+  create: (config) => new FractalTreeEngine(config),
 });

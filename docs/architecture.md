@@ -362,6 +362,8 @@ Phase 0/1 的目标是**语义正确**，不是字节级兼容。已知差异：
    | `lsm` | `LsmView`（MemTable + 分层 SST）、LSM 面板、SST 检查器、压实参数 |
    | `cow` | `CowView`（meta 页双缓冲 + 空闲表 / 被钉住的页 + 只读快照）、写时复制面板；同时让 `layoutTree` 隐藏孤立页 |
    | `snapshot-reader` | 只读快照：读事务只记下当前根页号，不加锁也没有版本链 |
+   | `message-buffer` | `FractalView`（每个内部节点顶上的消息缓冲条 + 下推弧线）、消息缓冲面板、参数里的缓冲容量旋钮 |
+   | `write-optimized` | 声明这个引擎为写优化：写路径不下降到数据所在的位置 |
    | `buffer-pool` | `BufferPoolView`、命中率/淘汰/脏页指标、缓冲池参数 |
    | `transactions` | 事务面板（会话切换、BEGIN/COMMIT/ROLLBACK、快照显示） |
    | `mvcc` | 可见性判定列表、膨胀率、HOT 统计 |

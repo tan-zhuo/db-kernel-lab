@@ -18,6 +18,7 @@ import { LsmPanel } from '@/components/panels/LsmPanel';
 import { ColumnarPanel } from '@/components/panels/ColumnarPanel';
 import { KvPanel } from '@/components/panels/KvPanel';
 import { CowPanel } from '@/components/panels/CowPanel';
+import { FractalPanel } from '@/components/panels/FractalPanel';
 import { Timeline } from '@/components/timeline/Timeline';
 import { Rail, type RailTab } from '@/components/ui/Rail';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
@@ -41,6 +42,7 @@ export function App() {
   const hasColumnar = useCapability('columnar');
   const hasKv = useCapability('kv');
   const hasCow = useCapability('cow');
+  const hasMessageBuffer = useCapability('message-buffer');
   const hasSecondaryIndex = useCapability('secondary-index');
   // 哈希 KV 只有「按键点查」一条路，查询构造器对它没有意义。
   const hasQuery = !hasKv;
@@ -101,6 +103,7 @@ export function App() {
           {hasColumnar && <ColumnarPanel />}
           {hasKv && <KvPanel />}
           {hasCow && <CowPanel />}
+          {hasMessageBuffer && <FractalPanel />}
           <MetricsPanel />
         </>
       ),

@@ -256,7 +256,12 @@ export class CowBTreeEngine implements StorageEngine {
 
   // ——— 页分配：优先从空闲表复用 ————————————————————
 
-  private allocPage(type: PageType, level: number, parentId: PageId | null, init?: CowNode): CowNode {
+  private allocPage(
+    type: PageType,
+    level: number,
+    parentId: PageId | null,
+    init?: { keys: Key[]; rows: (Row | null)[]; children: PageId[] },
+  ): CowNode {
     let id: PageId;
     const recycled = this.freelist.shift();
     if (recycled !== undefined) {
@@ -732,7 +737,8 @@ export class CowBTreeEngine implements StorageEngine {
 
   private insertIntoParent(left: CowNode, key: Key, right: CowNode): void {
     if (left.parentId === null) {
-      const root = this.allocPage('internal', left.level + 1, null);
+      // 新根带着左子一起分配；右子与分隔键由紧随其后的 SEPARATOR_INSERT 补上。
+      const root = this.allocPage('internal', left.level + 1, null, { keys: [], rows: [], children: [left.id] });
       root.keys = [key];
       root.children = [left.id, right.id];
       left.parentId = root.id;

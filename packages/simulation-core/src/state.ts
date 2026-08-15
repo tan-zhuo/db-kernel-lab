@@ -471,6 +471,35 @@ export interface CowState {
   writeTxns: number;
 }
 
+// ——— Phase 4：Bε-树 / 分形树 ————————————————————————
+
+export interface FractalMessageState {
+  /** 注入序号，全局唯一。同一个键会有很多条消息，只有它能精确定位。 */
+  id: number;
+  key: Key;
+  op: 'insert' | 'delete' | 'upsert';
+}
+
+export interface FractalState {
+  /** 每个内部节点的消息缓冲。键是页号。 */
+  buffers: Record<PageId, FractalMessageState[]>;
+  capacity: number;
+  /** 累计注入的消息条数（= 用户写了多少次）。 */
+  injected: number;
+  /**
+   * 累计下推条次（= 消息一共被重写了多少次）。
+   * `flushedHops / injected` 就是这棵树的写放大。
+   */
+  flushedHops: number;
+  /** 已经落到叶子、变成数据的消息数。 */
+  applied: number;
+  lastFlush: { from: PageId; to: PageId; count: number; toLeaf: boolean } | null;
+  /** 最近一次点查沿路翻缓冲的轨迹。 */
+  lastProbe: { key: Key; levels: { nodeId: PageId; level: number; messages: number; hits: number }[]; decidedInBuffer: boolean } | null;
+  /** 范围扫描 / 手动 flush 触发的强制清空次数。 */
+  pathFlushes: number;
+}
+
 export interface OperatorStat {
   nodeId: string;
   op: string;
@@ -518,6 +547,8 @@ export interface LabState {
   kv: KvState | null;
   /** 写时复制 B+ 树的 meta 页 / 空闲表 / 只读快照；其它引擎为 null。 */
   cow: CowState | null;
+  /** Bε-树的消息缓冲；其它引擎为 null。 */
+  fractal: FractalState | null;
   /** 最近一次结构性事件的序号，供可视化触发一次性动画。 */
   lastStructuralSeq: number;
   appliedSeq: number;
@@ -552,6 +583,7 @@ export function createInitialState(config: EngineConfig = DEFAULT_ENGINE_CONFIG)
     columnar: null,
     kv: null,
     cow: null,
+    fractal: null,
     lastStructuralSeq: -1,
     appliedSeq: -1,
   };
@@ -619,6 +651,19 @@ export function createCowState(): CowState {
   };
 }
 
+export function createFractalState(capacity: number): FractalState {
+  return {
+    buffers: {},
+    capacity,
+    injected: 0,
+    flushedHops: 0,
+    applied: 0,
+    lastFlush: null,
+    lastProbe: null,
+    pathFlushes: 0,
+  };
+}
+
 export function createMetrics(): Metrics {
   return {
     logicalReads: 0,
@@ -678,6 +723,11 @@ function lsm(state: LabState): LsmState {
 function cow(state: LabState): CowState {
   if (!state.cow) state.cow = createCowState();
   return state.cow;
+}
+
+function fractal(state: LabState): FractalState {
+  if (!state.fractal) state.fractal = createFractalState(state.config.fractalBufferCapacity);
+  return state.fractal;
 }
 
 function columnar(state: LabState): ColumnarState {
@@ -1667,6 +1717,68 @@ export function applyEvent(state: LabState, e: SimulationEvent): LabState {
       break;
     }
 
+    // ══ Phase 4：Bε-树 / 分形树 ════════════════════════════
+    case 'MSG_INJECT': {
+      const f = fractal(state);
+      f.capacity = e.capacity;
+      f.injected++;
+      (f.buffers[e.nodeId] ??= []).push({ id: e.msgId, key: e.key, op: e.op });
+      state.focusKey = e.key;
+      if (e.op === 'delete') m.recordsDeleted++;
+      else m.recordsInserted++;
+      break;
+    }
+    case 'MSG_FLUSH': {
+      const f = fractal(state);
+      const from = (f.buffers[e.fromNodeId] ??= []);
+      const moving = new Set(e.msgIds);
+      f.buffers[e.fromNodeId] = from.filter((msg) => !moving.has(msg.id));
+      f.flushedHops += e.msgIds.length;
+      f.lastFlush = { from: e.fromNodeId, to: e.toNodeId, count: e.msgIds.length, toLeaf: e.toLeaf };
+      if (e.toLeaf) {
+        // 推到叶子 = 当场变成数据，随后的 RECORD_* 事件会把它落到页里。
+        f.applied += e.msgIds.length;
+      } else {
+        const to = (f.buffers[e.toNodeId] ??= []);
+        for (let i = 0; i < e.msgIds.length; i++) to.push({ id: e.msgIds[i], key: e.keys[i], op: e.ops[i] });
+      }
+      state.lastStructuralSeq = e.seq;
+      break;
+    }
+    case 'BUFFER_STATE': {
+      const f = fractal(state);
+      f.capacity = e.capacity;
+      f.buffers[e.nodeId] ??= [];
+      break;
+    }
+    case 'BUFFER_SPLIT': {
+      const f = fractal(state);
+      const from = (f.buffers[e.pageId] ??= []);
+      const to = (f.buffers[e.newPageId] ??= []);
+      const moving = new Set(e.movedIds);
+      f.buffers[e.pageId] = from.filter((msg) => !moving.has(msg.id));
+      to.push(...from.filter((msg) => moving.has(msg.id)));
+      state.lastStructuralSeq = e.seq;
+      break;
+    }
+    case 'BUFFER_PROBE': {
+      const f = fractal(state);
+      if (f.lastProbe === null || f.lastProbe.key !== e.key || e.level >= (f.lastProbe.levels[0]?.level ?? -1)) {
+        if (f.lastProbe?.key !== e.key) f.lastProbe = { key: e.key, levels: [], decidedInBuffer: false };
+      }
+      f.lastProbe ??= { key: e.key, levels: [], decidedInBuffer: false };
+      f.lastProbe.levels.push({ nodeId: e.nodeId, level: e.level, messages: e.messages, hits: e.hits });
+      if (e.decisive) f.lastProbe.decidedInBuffer = true;
+      if (!state.path.includes(e.nodeId)) state.path.push(e.nodeId);
+      break;
+    }
+    case 'PATH_FLUSH': {
+      const f = fractal(state);
+      f.pathFlushes++;
+      state.lastStructuralSeq = e.seq;
+      break;
+    }
+
     // ══ Phase 4：写时复制 B+ 树 ════════════════════════════
     case 'COW_COPY': {
       const c = cow(state);
@@ -1953,6 +2065,8 @@ export interface StructuralSnapshot {
   kv?: StructuralKv;
   /** 写时复制 B+ 树专用。 */
   cow?: StructuralCow;
+  /** Bε-树 / 分形树专用。 */
+  fractal?: StructuralFractal;
 }
 
 /** 列存的结构投影：行组里每列存了哪些行、用了什么编码、区间统计是多少。 */
@@ -1985,6 +2099,21 @@ export function projectCow(c: CowState): StructuralCow {
     readers: c.readers.map((r) => ({ id: r.id, txnId: r.txnId, rootId: r.rootId })),
     pending: c.pending.map((p) => ({ txnId: p.txnId, pages: p.pages.slice() })),
   };
+}
+
+/** Bε-树的结构投影：每个内部节点缓冲里还压着哪些消息。 */
+export interface StructuralFractal {
+  buffers: { nodeId: PageId; messages: { id: number; key: Key; op: 'insert' | 'delete' | 'upsert' }[] }[];
+}
+
+export function projectFractal(f: FractalState): StructuralFractal {
+  const buffers: StructuralFractal['buffers'] = [];
+  for (const key of Object.keys(f.buffers).map(Number).sort((a, b) => a - b)) {
+    const messages = f.buffers[key];
+    if (!messages || messages.length === 0) continue;
+    buffers.push({ nodeId: key, messages: messages.map((m) => ({ id: m.id, key: m.key, op: m.op })) });
+  }
+  return { buffers };
 }
 
 /** KV 的结构投影：日志文件 + 内存索引指向。 */
@@ -2096,6 +2225,7 @@ export function projectStructure(state: LabState): StructuralSnapshot {
     columnar: state.columnar ? projectColumnar(state.columnar) : undefined,
     kv: state.kv ? projectKv(state.kv) : undefined,
     cow: state.cow ? projectCow(state.cow) : undefined,
+    fractal: state.fractal ? projectFractal(state.fractal) : undefined,
   };
 }
 

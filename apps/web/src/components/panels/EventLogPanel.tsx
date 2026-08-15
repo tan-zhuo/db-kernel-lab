@@ -16,6 +16,7 @@ const CATEGORY_STYLE: Record<EventCategory, string> = {
   lsm: 'text-teal-500',
   columnar: 'text-violet-400',
   cow: 'text-violet-400',
+  fractal: 'text-orange-500',
   kv: 'text-teal-500',
 };
 
@@ -33,6 +34,7 @@ const FILTERS: { id: 'all' | EventCategory; label: string; capability?: string }
   { id: 'columnar', label: '列存', capability: 'columnar' },
   { id: 'kv', label: 'KV', capability: 'kv' },
   { id: 'cow', label: '写时复制', capability: 'cow' },
+  { id: 'fractal', label: '消息缓冲', capability: 'message-buffer' },
 ];
 
 /** 事件日志：游标附近的窗口，点击任意行即可把整个实验跳到那一刻。 */

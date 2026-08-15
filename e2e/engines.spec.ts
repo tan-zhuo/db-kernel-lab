@@ -350,6 +350,59 @@ test('写时复制：关掉快照，被钉住的旧页立刻回到空闲表', as
   await expect(statValue(page, '空闲页')).not.toHaveText('0');
 });
 
+test('Bε-树：写只碰根，攒够一批才下推', async ({ page }) => {
+  const errors = collectErrors(page);
+  await page.goto('/');
+  await waitForReady(page);
+  await switchEngine(page, 'fractal-tree', /Bε-树/);
+  await bulkInsert(page, 40);
+
+  await openTab(page, 'state');
+  // 写放大远小于树高 —— 这就是攒批下推的全部收益
+  const height = Number(await statValue(page, '树高').innerText());
+  const amp = Number((await statValue(page, '写放大').innerText()).replace('×', ''));
+  expect(amp).toBeGreaterThan(0);
+  expect(amp).toBeLessThan(height);
+
+  await expectEvent(page, /注入消息/);
+  await expectEvent(page, /下推 \d+ 条消息/);
+  expect(errors).toEqual([]);
+});
+
+test('Bε-树：盲写不读旧值；缓冲调成 0 就退化成 B+ 树', async ({ page }) => {
+  await page.goto('/');
+  await waitForReady(page);
+  await switchEngine(page, 'fractal-tree', /Bε-树/);
+
+  await runScenario(page, 'fractal-blind-write');
+  await expectEvent(page, /注入消息 盲写/, 40_000);
+  await page.getByTitle('跳到结尾 (End)').click();
+  await openTab(page, 'state');
+  await expect(statValue(page, '在途消息')).not.toHaveText('0');
+
+  // ε 旋钮：容量调成 0，一条消息事件都不该再出现
+  await runScenario(page, 'fractal-epsilon');
+  await expect(page.getByText(/BULK INSERT ×40/).first()).toBeVisible({ timeout: 40_000 });
+  await page.getByTitle('跳到结尾 (End)').click();
+  await openTab(page, 'state');
+  await expect(statValue(page, '写入次数')).toHaveText('0');
+  await expect(statValue(page, '在途消息')).toHaveText('0');
+});
+
+test('Bε-树：范围扫描前把在途消息全推到叶子', async ({ page }) => {
+  await page.goto('/');
+  await waitForReady(page);
+  await switchEngine(page, 'fractal-tree', /Bε-树/);
+
+  await runScenario(page, 'fractal-scan-settle');
+  await expectEvent(page, /强制清空缓冲/, 40_000);
+  await page.getByTitle('跳到结尾 (End)').click();
+
+  await openTab(page, 'state');
+  await expect(statValue(page, '在途消息')).toHaveText('0');
+  await expect(statValue(page, '强制清空')).not.toHaveText('0');
+});
+
 test('会话持久化：刷新后仍然停在换过的引擎上', async ({ page }) => {
   await page.goto('/');
   await waitForReady(page);

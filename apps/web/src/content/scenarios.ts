@@ -1,6 +1,7 @@
 import {
   COLUMNAR_ENGINE_ID,
   COW_BTREE_ENGINE_ID,
+  FRACTAL_TREE_ENGINE_ID,
   DEFAULT_SCHEMA,
   INNODB_BTREE_ENGINE_ID,
   KV_HASH_ENGINE_ID,
@@ -609,6 +610,80 @@ export const SCENARIOS: Scenario[] = [
     config: { order: 4 },
     commands: [
       { kind: 'bulk_insert', count: 40, pattern: 'sequential', start: 1 },
+      { kind: 'full_scan' },
+    ],
+  },
+
+  // ══ Bε-树 / 分形树 ════════════════════════════════════════
+  {
+    id: 'fractal-inject',
+    engineId: FRACTAL_TREE_ENGINE_ID,
+    title: '① 写只碰根，叶子一动不动',
+    goal:
+      '先铺 24 行把树长起来，再写一条：只有**根节点顶上的缓冲条**长了一格，' +
+      '整棵树的叶子没有任何动静。这就是「写不下降」的字面意思 —— 也是它写得快的全部原因。',
+    config: { order: 4, fractalBufferCapacity: 8 },
+    commands: [
+      { kind: 'bulk_insert', count: 24, pattern: 'sequential', start: 1 },
+      { kind: 'insert', key: 500 },
+    ],
+  },
+  {
+    id: 'fractal-flush',
+    engineId: FRACTAL_TREE_ENGINE_ID,
+    title: '② 缓冲满了，一整批甩下去',
+    goal:
+      '缓冲只给 4 格，随机写 40 条：水位一满整条变红，随即一条黄弧把一整批消息甩给某个孩子。' +
+      '**写放大就发生在这条弧上** —— 但摊到每条消息，代价被批大小除掉了。',
+    config: { order: 4, fractalBufferCapacity: 4 },
+    commands: [{ kind: 'bulk_insert', count: 40, pattern: 'random', max: 200 }],
+  },
+  {
+    id: 'fractal-epsilon',
+    engineId: FRACTAL_TREE_ENGINE_ID,
+    title: '③ 缓冲容量就是那个 ε 旋钮',
+    goal:
+      '缓冲调到 0 再写 40 条：一条 MSG_INJECT 都不会出现，写立刻下降到叶子 ——' +
+      '它当场退化成一棵普通 B+ 树。跑完到「参数」标签把容量调回 16 再跑一遍，对比写放大那个数字。',
+    config: { order: 4, fractalBufferCapacity: 0 },
+    commands: [{ kind: 'bulk_insert', count: 40, pattern: 'random', max: 200 }],
+  },
+  {
+    id: 'fractal-blind-write',
+    engineId: FRACTAL_TREE_ENGINE_ID,
+    title: '④ 盲写：改一行不用先读',
+    goal:
+      '连改同一行 6 次：每次只投一条 upsert 消息，**全程没有一次查找**。' +
+      'B 树做不到这件事 —— 它必须先把那一页读进来才能改。这是 Bε-树最被低估的能力。',
+    config: { order: 4, fractalBufferCapacity: 8 },
+    commands: [
+      { kind: 'bulk_insert', count: 24, pattern: 'sequential', start: 1 },
+      ...Array.from({ length: 6 }, (_, i) => ({ kind: 'update', key: 7, row: { score: (i + 1) * 11 } }) as Command),
+    ],
+  },
+  {
+    id: 'fractal-read-amp',
+    engineId: FRACTAL_TREE_ENGINE_ID,
+    title: '⑤ 读要沿路把每层缓冲翻一遍',
+    goal:
+      '点查一个键：被翻过的缓冲会变青。树高 h 的树，B+ 树读 h 个页，它要读 h 个页**加**翻 h-1 块缓冲。' +
+      '读放大就长在这里 —— 这是写优化必须付的账。',
+    config: { order: 4, fractalBufferCapacity: 8 },
+    commands: [
+      { kind: 'bulk_insert', count: 40, pattern: 'random', max: 200 },
+      { kind: 'search', key: 21 },
+    ],
+  },
+  {
+    id: 'fractal-scan-settle',
+    engineId: FRACTAL_TREE_ENGINE_ID,
+    title: '⑥ 范围扫描：攒的账要当场结清',
+    goal:
+      '写一堆再全表扫描：开扫之前所有缓冲被强制清空，消息一路推到叶子。' +
+      '叶子不最新就没法扫 —— 这是 Bε-树没能取代 B+ 树的核心原因之一。',
+    config: { order: 4, fractalBufferCapacity: 8 },
+    commands: [
+      { kind: 'bulk_insert', count: 40, pattern: 'random', max: 300 },
       { kind: 'full_scan' },
     ],
   },

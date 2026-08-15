@@ -29,7 +29,10 @@ export type EngineCapability =
   | 'hash-index'
   // Phase 4：写时复制 B+ 树（LMDB 风格）
   | 'cow'
-  | 'snapshot-reader';
+  | 'snapshot-reader'
+  // Phase 4：Bε-树 / 分形树
+  | 'message-buffer'
+  | 'write-optimized';
 
 export interface EngineConfig {
   /** B+ 树阶数：内部页最多 order 个子指针，叶子页最多 order-1 条记录。 */
@@ -107,6 +110,16 @@ export interface EngineConfig {
   kvHashBuckets: number;
   /** 失效数据占比超过它就触发合并（回收空间）。 */
   kvMergeThreshold: number;
+
+  // ——— Phase 4：Bε-树 / 分形树 ————————————————————————
+
+  /**
+   * 内部节点的消息缓冲能放多少条消息。
+   *
+   * 它就是 Bε-树里那个 ε 旋钮的具体化：
+   * 调到 **0** 退化成普通 B+ 树（写立刻下降到叶子），调得越大写越快、读越慢。
+   */
+  fractalBufferCapacity: number;
 }
 
 export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
@@ -141,6 +154,8 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   kvLogFileRecords: 8,
   kvHashBuckets: 16,
   kvMergeThreshold: 0.4,
+
+  fractalBufferCapacity: 8,
 };
 
 /** 用户级命令：worker 的输入单元，也是会话持久化的最小单位。 */

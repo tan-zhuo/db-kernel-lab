@@ -517,7 +517,58 @@ export type SimulationEventBody =
   | { type: 'SNAPSHOT_CLOSE'; readerId: string; session: string; txnId: number; readers: number }
   /** 旧版本的页确认没人看得见了，进空闲表等待复用。 */
   | { type: 'FREELIST_PUSH'; pageIds: PageId[]; releasedTxns: number[]; txnId: number; freePages: number }
-  | { type: 'FREELIST_POP'; pageId: PageId; txnId: number; remaining: number };
+  | { type: 'FREELIST_POP'; pageId: PageId; txnId: number; remaining: number }
+
+  // ══ Phase 4：Bε-树 / 分形树（TokuDB 风格）══════════════════
+  /**
+   * 往根节点的缓冲里注入一条消息 —— **这就是 Bε-树的整个写路径**。
+   * 不下降、不定位、不读旧值。
+   */
+  | {
+      type: 'MSG_INJECT';
+      nodeId: PageId;
+      /** 消息的稳定 id（注入序号）。reducer 靠它精确增删 —— 键与操作都会重复。 */
+      msgId: number;
+      key: Key;
+      op: 'insert' | 'delete' | 'upsert';
+      bufferSize: number;
+      capacity: number;
+    }
+  /**
+   * 一批消息整体推给某个孩子。
+   *
+   * 写放大被摊薄就发生在这里：一条消息独自走完 h 层要付 h 次重写，
+   * 一百条一起走，每条只付 h/100。
+   */
+  | {
+      type: 'MSG_FLUSH';
+      fromNodeId: PageId;
+      toNodeId: PageId;
+      childSlot: number;
+      msgIds: number[];
+      keys: Key[];
+      ops: ('insert' | 'delete' | 'upsert')[];
+      /** 推到叶子就意味着这批消息当场变成数据。 */
+      toLeaf: boolean;
+      remaining: number;
+      reason: string;
+    }
+  /** 缓冲水位变化（刷写后 / 分裂后），供 3D 的缓冲条使用。 */
+  | { type: 'BUFFER_STATE'; nodeId: PageId; size: number; capacity: number }
+  /** 内部节点分裂时缓冲也要按分隔键劈开：消息跟着它所属的孩子走。 */
+  | { type: 'BUFFER_SPLIT'; pageId: PageId; newPageId: PageId; movedIds: number[]; movedKeys: Key[]; stayed: number }
+  /** 读路径在某一层缓冲里找这个键。`decisive` 表示答案就在这里，不用再往下走。 */
+  | {
+      type: 'BUFFER_PROBE';
+      nodeId: PageId;
+      level: number;
+      key: Key;
+      messages: number;
+      hits: number;
+      decisive: boolean;
+    }
+  /** 范围扫描 / 手动 flush 逼着某个节点把缓冲全部吐出去。 */
+  | { type: 'PATH_FLUSH'; nodeId: PageId; level: number; messages: number; reason: string };
 
 export type SimulationEvent = EventMeta & SimulationEventBody;
 export type SimulationEventType = SimulationEventBody['type'];
@@ -622,6 +673,13 @@ export const EVENT_CATEGORY: Record<SimulationEventType, EventCategory> = {
   SNAPSHOT_CLOSE: 'txn',
   FREELIST_PUSH: 'cow',
   FREELIST_POP: 'cow',
+
+  MSG_INJECT: 'fractal',
+  MSG_FLUSH: 'fractal',
+  BUFFER_STATE: 'fractal',
+  BUFFER_SPLIT: 'structure',
+  BUFFER_PROBE: 'access',
+  PATH_FLUSH: 'fractal',
 };
 
 export type EventCategory =
@@ -637,7 +695,8 @@ export type EventCategory =
   | 'lsm'
   | 'columnar'
   | 'kv'
-  | 'cow';
+  | 'cow'
+  | 'fractal';
 
 /**
  * 每类事件占用的「逻辑时长」（毫秒）。
@@ -744,6 +803,13 @@ export const EVENT_DURATION: Record<SimulationEventType, number> = {
   SNAPSHOT_CLOSE: 260,
   FREELIST_PUSH: 200,
   FREELIST_POP: 90,
+
+  MSG_INJECT: 130,
+  MSG_FLUSH: 460,
+  BUFFER_STATE: 50,
+  BUFFER_SPLIT: 260,
+  BUFFER_PROBE: 150,
+  PATH_FLUSH: 320,
 };
 
 /** 时间轴上值得停留的「关键帧」——单步/自动播放会在这些事件上放慢。 */
@@ -778,7 +844,14 @@ export const KEYFRAME_EVENTS: ReadonlySet<SimulationEventType> = new Set<Simulat
   'META_FLIP',
   'SNAPSHOT_OPEN',
   'WRITE_TXN_COMMIT',
+  'MSG_FLUSH',
+  'BUFFER_SPLIT',
+  'PATH_FLUSH',
 ]);
+
+function opLabel(op: 'insert' | 'delete' | 'upsert'): string {
+  return op === 'insert' ? '插入' : op === 'delete' ? '删除' : '盲写';
+}
 
 /** 人类可读的一行事件描述，供事件日志与时间轴 tooltip 使用。 */
 export function describeEvent(e: SimulationEvent): string {
@@ -994,6 +1067,23 @@ export function describeEvent(e: SimulationEvent): string {
       return `${e.pageIds.length} 个旧版本页确认无人可见，进空闲表（现有 ${e.freePages} 页可复用）`;
     case 'FREELIST_POP':
       return `从空闲表复用页 #${e.pageId}（剩 ${e.remaining} 页）`;
+
+    case 'MSG_INJECT':
+      return `注入消息 ${opLabel(e.op)} key=${e.key} → 根缓冲 ${e.bufferSize}/${e.capacity} —— 写路径到此为止，没有下降`;
+    case 'MSG_FLUSH':
+      return `下推 ${e.keys.length} 条消息：#${e.fromNodeId} → #${e.toNodeId}（第 ${e.childSlot} 个孩子${
+        e.toLeaf ? '，是叶子 → 当场落地成数据' : ''
+      }）—— ${e.reason}`;
+    case 'BUFFER_STATE':
+      return `缓冲水位 #${e.nodeId}：${e.size}/${e.capacity}`;
+    case 'BUFFER_SPLIT':
+      return `缓冲随节点分裂：#${e.pageId} 留下 ${e.stayed} 条，${e.movedKeys.length} 条跟着孩子去了 #${e.newPageId}`;
+    case 'BUFFER_PROBE':
+      return `翻缓冲 #${e.nodeId}（第 ${e.level} 层，${e.messages} 条）找 key=${e.key} → ${
+        e.hits === 0 ? '没有' : e.decisive ? `命中 ${e.hits} 条，答案就在这里，不用再往下` : `命中 ${e.hits} 条 upsert，还得往下拿底稿`
+      }`;
+    case 'PATH_FLUSH':
+      return `强制清空缓冲 #${e.nodeId}（第 ${e.level} 层，${e.messages} 条）：${e.reason}`;
     default: {
       const never: never = e;
       return JSON.stringify(never);

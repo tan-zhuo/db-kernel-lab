@@ -4,5 +4,6 @@ export * from './lsm-layout';
 export * from './columnar-layout';
 export * from './kv-layout';
 export * from './cow-layout';
+export * from './fractal-layout';
 export * from './palette';
 export * from './highlights';

@@ -6,6 +6,7 @@ import {
   PALETTE,
   layoutColumnar,
   layoutCow,
+  layoutFractal,
   layoutHeap,
   layoutKv,
   layoutLsm,
@@ -20,6 +21,7 @@ import { LsmView } from './LsmView';
 import { ColumnarView } from './ColumnarView';
 import { KvView } from './KvView';
 import { CowView } from './CowView';
+import { FractalView } from './FractalView';
 
 /** 供「导出截图」使用的渲染器引用（在 Canvas 内部登记）。 */
 let glRef: THREE.WebGLRenderer | null = null;
@@ -76,6 +78,7 @@ export function SceneRoot() {
  *  - `columnar` → 列 × 行组的矩阵
  *  - `kv`    → 上层内存哈希桶 + 下层追加写日志文件
  *  - `cow`   → 树顶两个 meta 页 + 右侧空闲表 / 挂起页 + 左侧只读快照
+ *  - `message-buffer` → 每个内部节点顶上的消息缓冲条 + 下推弧线
  *  - `buffer-pool` → 右侧的缓冲池货架
  *
  * 第三方引擎只要声明同样的能力，就能直接复用这些视图。
@@ -90,6 +93,7 @@ function SceneContent() {
   const hasColumnar = useCapability('columnar');
   const hasKv = useCapability('kv');
   const hasCow = useCapability('cow');
+  const hasMessageBuffer = useCapability('message-buffer');
   const hasBufferPool = useCapability('buffer-pool');
 
   // 布局只算一次，B+ 树视图、堆视图与缓冲池视图共用。
@@ -132,6 +136,11 @@ function SceneContent() {
       const k = layoutKv(state.kv);
       return { minX: k.bounds.minX, maxX: k.bounds.maxX, minY: k.bounds.minY, maxY: k.bounds.maxY };
     }
+    if (hasMessageBuffer && state.fractal) {
+      // 缓冲条画在节点上方，「适应视图」要把最高那条也框进来。
+      const fr = layoutFractal(state.fractal, layout);
+      return { minX: fr.bounds.minX, maxX: fr.bounds.maxX, minY: fr.bounds.minY, maxY: fr.bounds.maxY };
+    }
     if (hasCow && state.cow) {
       // meta 页在树顶、空闲表在右、只读快照在左，「适应视图」要把它们一起框进来。
       const cw = layoutCow(state.cow, layout);
@@ -146,7 +155,7 @@ function SceneContent() {
       maxY: Math.max(b.maxY, bp.maxY),
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layout, showBufferPool, hasBufferPool, hasHeap, hasLsm, hasColumnar, hasKv, hasCow, state, state.buffer.frames.length]);
+  }, [layout, showBufferPool, hasBufferPool, hasHeap, hasLsm, hasColumnar, hasKv, hasCow, hasMessageBuffer, state, state.buffer.frames.length]);
 
   // 雾必须跟着场景尺度走：索引变多之后树会横向铺开很远，
   // 固定的雾距会把整个森林都吃掉（画面全黑）。
@@ -161,6 +170,7 @@ function SceneContent() {
       {hasColumnar && <ColumnarView />}
       {hasKv && <KvView />}
       {hasCow && <CowView treeLayout={layout} />}
+      {hasMessageBuffer && <FractalView treeLayout={layout} />}
       {hasBufferPool && showBufferPool && <BufferPoolView layout={layout} />}
       <CameraRig layout={layout} bounds={bounds} />
     </>
