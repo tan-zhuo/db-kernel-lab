@@ -1,4 +1,4 @@
-import { Camera, Download, Eye, Fullscreen, Loader2, RotateCcw, Type } from 'lucide-react';
+import { BookOpen, Camera, Download, Eye, Fullscreen, Loader2, RotateCcw, Type } from 'lucide-react';
 import { useCapability, useSimStore } from '@/state/store';
 import { captureScreenshot } from '@/components/scene/SceneRoot';
 import { ThemePicker } from '@/components/ThemePicker';
@@ -43,6 +43,14 @@ export function TopBar() {
         title="显示/隐藏页面文字标签 (L)"
       >
         <Type size={13} />
+      </button>
+      <button
+        className="dbkl-btn"
+        data-testid="open-guide"
+        onClick={() => store.getState().setGuideOpen(true)}
+        title="打开原理讲解：五种存储引擎的物理模型、机制与取舍"
+      >
+        <BookOpen size={13} /> 原理
       </button>
       <ThemePicker />
       <button className="dbkl-btn" onClick={() => store.getState().focusPage(null)} title="适应视图 (G)">

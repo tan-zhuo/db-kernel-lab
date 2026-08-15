@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { TopBar } from '@/components/TopBar';
 import { SceneOverlay } from '@/components/SceneOverlay';
+import { GuideOverlay } from '@/components/GuideOverlay';
 import { SceneRoot } from '@/components/scene/SceneRoot';
 import { EnginePanel } from '@/components/panels/EnginePanel';
 import { OperationsPanel } from '@/components/panels/OperationsPanel';
@@ -45,7 +46,7 @@ export function App() {
   }, [boot]);
 
   return (
-    <div className="flex h-full flex-col bg-ink-950">
+    <div className="relative flex h-full flex-col bg-ink-950">
       <TopBar />
       <div className="flex min-h-0 flex-1">
         <aside className="flex w-[340px] shrink-0 flex-col overflow-y-auto border-r border-ink-700 bg-ink-900">
@@ -75,6 +76,7 @@ export function App() {
         </aside>
       </div>
       <Timeline />
+      <GuideOverlay />
     </div>
   );
 }

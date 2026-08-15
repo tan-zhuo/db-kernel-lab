@@ -30,8 +30,8 @@ pnpm dev          # http://localhost:5173
 pnpm build        # 产出 apps/web/dist（纯静态）
 pnpm preview      # 本地预览构建产物
 
-pnpm test         # 单元测试（Vitest，167 项）
-pnpm test:e2e     # 端到端 / 关键路径测试（Playwright，30 项）
+pnpm test         # 单元测试（Vitest，174 项）
+pnpm test:e2e     # 端到端 / 关键路径测试（Playwright，35 项）
 pnpm typecheck    # 全仓库类型检查
 ```
 
@@ -77,6 +77,15 @@ pnpm typecheck    # 全仓库类型检查
 | `M` | 打点 | `B` / `L` | 缓冲池 / 文字标签 |
 | `Esc` | 取消选中 | | |
 
+## 原理讲解页
+
+顶栏的「原理」按钮打开一份**可读的长文**，五个引擎各一页，外加一页「怎么选」：
+
+* 每页从**物理模型**讲起（带 ASCII 图），因为所有行为都是布局的推论；
+* 每个机制讲完就挂一个 **「跑这个实验」** 按钮 —— 点了自动切引擎、跑命令、关掉讲解让你看 3D 画面；
+* **短板与长处一起写**，并明确标注仿真的简化点，别把教学模型当成真实实现；
+* 「怎么选」那页给出决策路径，和一张「同一条 `UPDATE key=2` 在五个引擎里各自发生了什么」的对照表。
+
 ## 配色主题
 
 顶栏右侧的调色板按钮可切换四套主题，**面板与 3D 场景同时生效**，选择记在本机：
@@ -99,6 +108,7 @@ db-kernel-lab/
 │   └── src/
 │       ├── components/scene/       # 3D：B+ 树、堆文件、LSM 层级、列存矩阵、KV 哈希表、连线、缓冲池、相机
 │       ├── components/panels/      # 引擎、操作、事务/MVCC、LSM、列存、KV、查询、索引、表结构、参数、执行计划、检查器、指标、事件日志、引导实验
+│       ├── content/                # ★ 引导实验（纯数据）与原理讲解正文
 │       ├── components/timeline/    # 时间轴
 │       ├── state/store.ts          # zustand：游标、播放、命令日志
 │       ├── workers/                # 仿真 Worker 入口

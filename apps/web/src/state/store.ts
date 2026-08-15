@@ -66,6 +66,8 @@ export interface SimStore {
   capabilities: readonly string[];
   showBufferPool: boolean;
   showLabels: boolean;
+  /** 原理讲解页是否打开。 */
+  guideOpen: boolean;
   /** 当前配色主题。UI 与 3D 场景共用一套。 */
   theme: ThemeId;
   /** 每次换主题自增：让缓存了颜色的组件重算。 */
@@ -93,6 +95,7 @@ export interface SimStore {
   /** 请求相机聚焦：传页号则飞向该页，传 null 则适应整棵树。 */
   focusPage(pageId: PageId | null): void;
   setConfig(patch: Partial<EngineConfig>): void;
+  setGuideOpen(open: boolean): void;
   setTheme(theme: ThemeId): void;
   toggleBufferPool(): void;
   toggleLabels(): void;
@@ -125,6 +128,7 @@ export const useSimStore = create<SimStore>()((set, get) => ({
   capabilities: [],
   showBufferPool: true,
   showLabels: true,
+  guideOpen: false,
   theme: readStoredTheme(),
   themeVersion: 0,
 
@@ -403,6 +407,10 @@ export const useSimStore = create<SimStore>()((set, get) => ({
 
   setConfig(patch) {
     set({ config: { ...get().config, ...patch } });
+  },
+
+  setGuideOpen(open) {
+    set({ guideOpen: open });
   },
 
   setTheme(theme) {
