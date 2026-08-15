@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { Grid, OrbitControls } from '@react-three/drei';
 import { PALETTE, layoutHeap, layoutLsm, layoutTree, type TreeLayout } from '@dbkl/visualization';
-import { useCapability, useLabState, useSimStore } from '@/state/store';
+import { useCapability, useLabState, useSimStore, useThemeVersion } from '@/state/store';
 import { BTreeView } from './BTreeView';
 import { BufferPoolView, bufferPoolExtent } from './BufferPoolView';
 import { HeapView } from './HeapView';
@@ -18,6 +18,10 @@ export function captureScreenshot(): string | null {
 }
 
 export function SceneRoot() {
+  // 场景背景 / 灯光 / 网格是**声明式**的：只在重渲染时才重新读取 PALETTE。
+  // 换主题不会改变任何仿真状态，所以必须显式订阅 themeVersion，
+  // 否则会出现「树的颜色变了、底色还停在旧主题」的割裂。
+  useThemeVersion();
   return (
     <Canvas
       dpr={[1, 2]}
@@ -29,9 +33,9 @@ export function SceneRoot() {
     >
       <color attach="background" args={[PALETTE.background]} />
       <ambientLight intensity={0.75} />
-      <hemisphereLight args={['#8ab4ff', '#0a0f1a', 0.6]} />
+      <hemisphereLight args={[PALETTE.skyLight, PALETTE.groundLight, 0.6]} />
       <directionalLight position={[14, 26, 18]} intensity={1.1} />
-      <directionalLight position={[-18, 10, -12]} intensity={0.35} color="#7c5cff" />
+      <directionalLight position={[-18, 10, -12]} intensity={0.35} color={PALETTE.fillLight} />
       <SceneContent />
       <Grid
         position={[0, -1.6, 0]}
@@ -41,7 +45,7 @@ export function SceneRoot() {
         cellColor={PALETTE.grid}
         sectionSize={10}
         sectionThickness={1}
-        sectionColor="#1d2a44"
+        sectionColor={PALETTE.gridSection}
         fadeDistance={90}
         fadeStrength={1.4}
         infiniteGrid
@@ -63,6 +67,7 @@ export function SceneRoot() {
  */
 function SceneContent() {
   const state = useLabState();
+  useThemeVersion();
   const showBufferPool = useSimStore((s) => s.showBufferPool);
   const hasBTree = useCapability('btree');
   const hasHeap = useCapability('heap');

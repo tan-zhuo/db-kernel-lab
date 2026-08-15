@@ -70,7 +70,7 @@ export function EventLogPanel() {
             <button
               key={f.id}
               className={`rounded px-1.5 py-0.5 text-[10px] ${
-                filter === f.id ? 'bg-ink-600 text-white' : 'text-mute-400 hover:text-mute-200'
+                filter === f.id ? 'bg-ink-600 text-strong' : 'text-mute-400 hover:text-mute-200'
               }`}
               onClick={() => setFilter(f.id)}
             >

@@ -11,9 +11,11 @@ interface AnimEntry {
   scale: number;
 }
 
-const childColor = new THREE.Color(PALETTE.edgeChild);
-const activeColor = new THREE.Color(PALETTE.edgeChildActive);
-const siblingColor = new THREE.Color(PALETTE.edgeSibling);
+// 复用的 Color 实例（避免每帧 new）。值每帧从 PALETTE 现取，
+// 这样换主题后连线颜色下一帧就跟着变，而不是停在启动时的那套。
+const childColor = new THREE.Color();
+const activeColor = new THREE.Color();
+const siblingColor = new THREE.Color();
 
 /**
  * 父子指针 + 叶子链表连线。
@@ -38,6 +40,9 @@ export function TreeEdges({ layout, anim }: { layout: TreeLayout; anim: RefObjec
     const now = performance.now();
     const edges = edgesRef.current;
     const byId = layoutRef.current.byId;
+    childColor.set(PALETTE.edgeChild);
+    activeColor.set(PALETTE.edgeChildActive);
+    siblingColor.set(PALETTE.edgeSibling);
 
     for (let i = 0; i < edges.length; i++) {
       const e = edges[i];

@@ -232,6 +232,36 @@ WAL 不是个计数器，它真的存着数据，而且**只存还没落盘的�
 
 判据很硬：**崩溃前后 `liveKeys()` 必须完全相等**，这条断言就在 `lsm.test.ts` 里。
 
+## 3.11 配色主题
+
+四套主题（石板 / 深空 / 暖夜 / 日光）由**一份定义**驱动两条通路：
+
+```
+THEMES[id] ──┬─► applyTheme()：就地覆盖 PALETTE（3D 场景，下一帧生效）
+             └─► <html data-theme>：覆盖 CSS 变量（面板，立即生效）
+```
+
+三条约束：
+
+1. **`PALETTE` 是活对象**。`applyTheme` 用 `Object.assign` 就地覆盖它，
+   所以每帧读 `PALETTE.leaf` 的 `useFrame` 自动拿到新色，不需要把主题一路传下去。
+   代价是：**任何地方都不能把 PALETTE 的值拷成模块级常量**
+   （`HIGHLIGHT_COLOR` 因此写成 getter，`TreeEdges` 的 Color 实例每帧重设）。
+2. **声明式的场景属性要显式订阅 `themeVersion`**。背景色、雾、灯光、网格是
+   R3F 的 props/args，只在重渲染时才重新读 `PALETTE`；换主题不改变任何仿真状态，
+   所以 `SceneRoot` / `SceneContent` 必须订阅 `useThemeVersion()`，
+   否则会出现「树变色了、底色还是旧主题」的割裂。
+3. **文字贴图必须清缓存**。`labelTexture` 把颜色烘进了像素并按 key 缓存，
+   换主题时调 `clearLabelCache()`，否则场景里的标签会保持旧色。
+
+CSS 侧：`ink-*` / `mute-*` 是**角色**而非字面明暗
+（ink-950=应用底色、ink-900=面板、ink-700=边框、mute-200=主要文字、strong=最高对比），
+所以浅色主题只要整体换掉这组变量，一个组件都不用改。
+主题在 `index.html` 里由一段内联脚本在首帧前设好，避免闪一帧默认配色。
+
+语义色跨主题保持含义（绿=新增 / 红=删除 / 黄=路径 / 橙=脏页），
+单测 `theme.test.ts` 守护：字段集一致、颜色格式合法、正文与背景的明度差 > 0.35。
+
 ## 4. 确定性与会话恢复
 
 引擎里所有随机性都来自种子化的 `Rng`（mulberry32），reducer 是纯函数，

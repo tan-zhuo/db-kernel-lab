@@ -1,7 +1,46 @@
 @import 'tailwindcss';
 
-/* 深色科研工具主题：低饱和背景 + 高信息密度 + 等宽数字。 */
+/*
+ * 科研工具主题系统。
+ *
+ * `ink-*` / `mute-*` 是**角色**而不是字面明暗：
+ *   ink-950 = 应用底色，ink-900 = 面板，ink-850 = 卡片/输入框，ink-800 = 按钮/表头，
+ *   ink-700/600/500 = 边框由浅入深，mute-400 = 次要文字，mute-300 = 正文，mute-200 = 主要文字，
+ *   strong = 标题级最高对比。
+ * 因此浅色主题只要把这组值整体换掉即可，不用改任何一个组件。
+ *
+ * 主题通过 <html data-theme="..."> 切换；Tailwind v4 生成的工具类引用的是
+ * var(--color-*)，所以覆盖变量就够了。3D 场景那一套在
+ * packages/visualization/src/palette.ts 里同步切换。
+ */
 @theme {
+  /* 默认：石板（比纯黑亮一档，久看不割眼） */
+  --color-ink-950: #10151d;
+  --color-ink-900: #151c27;
+  --color-ink-850: #1a2230;
+  --color-ink-800: #202a3a;
+  --color-ink-700: #2a3648;
+  --color-ink-600: #35435a;
+  --color-ink-500: #45566f;
+  --color-mute-400: #8d9bb2;
+  --color-mute-300: #adbbd0;
+  --color-mute-200: #dce4f0;
+  --color-strong: #ffffff;
+
+  --color-accent-500: #3b82f6;
+  --color-accent-400: #74aaff;
+  --color-violet-500: #8b6cff;
+  --color-teal-500: #14b8a6;
+  --color-green-500: #3fb950;
+  --color-amber-500: #d9a441;
+  --color-orange-500: #e07f3a;
+  --color-red-500: #f85149;
+
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+}
+
+/* ① 深空 —— 近黑，对比最强，适合暗房与录屏 */
+[data-theme='deep'] {
   --color-ink-950: #05070d;
   --color-ink-900: #080b12;
   --color-ink-850: #0b1018;
@@ -12,6 +51,7 @@
   --color-mute-400: #6b7a91;
   --color-mute-300: #93a4bd;
   --color-mute-200: #c6d2e2;
+  --color-strong: #ffffff;
 
   --color-accent-500: #2f81f7;
   --color-accent-400: #58a6ff;
@@ -21,8 +61,54 @@
   --color-amber-500: #d29922;
   --color-orange-500: #db6d28;
   --color-red-500: #f85149;
+}
 
-  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+/* ③ 暖夜 —— 暖褐灰、低蓝光 */
+[data-theme='warm'] {
+  --color-ink-950: #14120f;
+  --color-ink-900: #1c1a17;
+  --color-ink-850: #23201c;
+  --color-ink-800: #2b2721;
+  --color-ink-700: #38322a;
+  --color-ink-600: #473f35;
+  --color-ink-500: #5a5044;
+  --color-mute-400: #a4978a;
+  --color-mute-300: #c7bbab;
+  --color-mute-200: #ece3d6;
+  --color-strong: #fff9f0;
+
+  --color-accent-500: #3f83d8;
+  --color-accent-400: #6ba6ea;
+  --color-violet-500: #a274e8;
+  --color-teal-500: #1fae94;
+  --color-green-500: #4fa85c;
+  --color-amber-500: #e0a53c;
+  --color-orange-500: #e07f3a;
+  --color-red-500: #e8624f;
+}
+
+/* ④ 日光 —— 白纸底深色字。注意这不是简单反色：边框要更实，强调色要更深 */
+[data-theme='light'] {
+  --color-ink-950: #e9edf3;
+  --color-ink-900: #f6f8fb;
+  --color-ink-850: #ffffff;
+  --color-ink-800: #eef1f6;
+  --color-ink-700: #d3dae4;
+  --color-ink-600: #bcc6d4;
+  --color-ink-500: #9aa7b9;
+  --color-mute-400: #647082;
+  --color-mute-300: #46536a;
+  --color-mute-200: #1b2432;
+  --color-strong: #0b1220;
+
+  --color-accent-500: #1d4ed8;
+  --color-accent-400: #1e40af;
+  --color-violet-500: #6d28d9;
+  --color-teal-500: #0f766e;
+  --color-green-500: #15803d;
+  --color-amber-500: #b45309;
+  --color-orange-500: #c2410c;
+  --color-red-500: #b91c1c;
 }
 
 html,
@@ -35,6 +121,9 @@ body {
   margin: 0;
   background: var(--color-ink-950);
   color: var(--color-mute-200);
+  transition:
+    background-color 220ms ease,
+    color 220ms ease;
   font-family:
     system-ui,
     -apple-system,
@@ -109,7 +198,7 @@ input[type='range'] {
 .dbkl-btn:hover:not(:disabled) {
   background: var(--color-ink-700);
   border-color: var(--color-ink-500);
-  color: #fff;
+  color: var(--color-strong);
 }
 .dbkl-btn:disabled {
   opacity: 0.45;

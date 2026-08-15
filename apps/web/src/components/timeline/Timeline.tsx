@@ -304,8 +304,8 @@ export function Timeline() {
         ))}
 
         {/* 游标 */}
-        <div className="pointer-events-none absolute inset-y-0 w-[2px] bg-white/90" style={{ left: `${pct(cursor)}%` }}>
-          <div className="absolute -left-[4px] top-0 h-2.5 w-2.5 rotate-45 bg-white" />
+        <div className="pointer-events-none absolute inset-y-0 w-[2px] bg-strong/90" style={{ left: `${pct(cursor)}%` }}>
+          <div className="absolute -left-[4px] top-0 h-2.5 w-2.5 rotate-45 bg-strong" />
         </div>
       </div>
     </div>

@@ -1,18 +1,119 @@
 /**
  * 统一视觉语言（文档 §7）。
+ *
  * 所有颜色集中在此，3D 与 2D 面板共用，保证「绿=新增 / 红=删除淘汰 / 黄=查找路径 /
- * 橙=脏页 / 紫=锁等待」在任何视图中含义一致。
+ * 橙=脏页 / 紫=锁等待」在**任何主题、任何视图**里含义一致 ——
+ * 换主题只换明暗与色温，不换语义。
+ *
+ * `PALETTE` 是一个**活对象**：`applyTheme()` 就地覆盖它的字段，
+ * 于是所有 `PALETTE.leaf` 这样的读取（包括每帧跑的 useFrame）下一帧就拿到新颜色，
+ * 不需要把主题一路 props 传下去。代价是：**不要解构后长期持有**。
  */
-export const PALETTE = {
+
+export interface PaletteShape {
+  // —— 场景底色与灯光 ——
+  background: string;
+  grid: string;
+  gridSection: string;
+  /** 半球光的天空色 / 地面色 + 补光色，决定整个场景的冷暖。 */
+  skyLight: string;
+  groundLight: string;
+  fillLight: string;
+
+  // —— 文字（Canvas 贴图用；必须跟着主题走，否则浅色主题下白字会消失）——
+  textPrimary: string;
+  textSecondary: string;
+  textMuted: string;
+  textOnLeaf: string;
+  textOnInternal: string;
+
+  // —— B+ 树 ——
+  leaf: string;
+  leafDim: string;
+  internal: string;
+  internalDim: string;
+  root: string;
+  slotEmpty: string;
+  slotFilled: string;
+  slotFilledInternal: string;
+
+  // —— 语义色（跨主题保持含义）——
+  insert: string;
+  update: string;
+  remove: string;
+  searchPath: string;
+  hit: string;
+  dirty: string;
+  evict: string;
+  split: string;
+  merge: string;
+  lock: string;
+  /** 回表连线：二级索引 → 聚簇索引。 */
+  lookup: string;
+  resident: string;
+  selected: string;
+
+  edgeChild: string;
+  edgeChildActive: string;
+  edgeSibling: string;
+
+  // —— PostgreSQL 堆表 / MVCC ——
+  /** 堆页外框（无序数据页，与 B+ 树页明显区分）。 */
+  heapPage: string;
+  /** 活元组：当前快照能看见的版本。 */
+  tupleLive: string;
+  /** 死元组：已被打上 xmax，等 VACUUM 回收 —— 表膨胀的来源。 */
+  tupleDead: string;
+  /** 行指针重定向（HOT 链被剪枝后留下的指针）。 */
+  tupleRedirect: string;
+  /** 空闲行指针，可被新版本复用。 */
+  tupleUnused: string;
+  /** 可见性映射里被标成 all-visible 的页。 */
+  allVisible: string;
+  /** 版本链 t_ctid 连线。 */
+  versionChain: string;
+  /** HOT 链：新版本不写索引，用不同颜色区分。 */
+  hotChain: string;
+  /** 索引项 → 堆元组的一跳。 */
+  heapFetch: string;
+
+  // —— LSM-Tree ——
+  memtable: string;
+  memtableFrozen: string;
+  /** MemTable 容器外壳（空的时候也要看得见）。 */
+  memtableShell: string;
+  /** 各层 SST 的底色，越往下越冷。 */
+  sstLevel: readonly string[];
+  /** 正在参与压实的文件 / 积压的压实任务。 */
+  compacting: string;
+  /** 墓碑占比的提示色。 */
+  tombstone: string;
+  /** 布隆过滤器成功挡掉一个文件。 */
+  bloomSkip: string;
+}
+
+export type ThemeId = 'deep' | 'slate' | 'warm' | 'light';
+
+/** ① 深空 —— 近黑背景，对比最强，适合暗房与录屏。 */
+const DEEP: PaletteShape = {
   background: '#080b12',
   grid: '#141b2b',
+  gridSection: '#1d2a44',
+  skyLight: '#8ab4ff',
+  groundLight: '#0a0f1a',
+  fillLight: '#7c5cff',
+
+  textPrimary: '#e6edf3',
+  textSecondary: '#dbe6f5',
+  textMuted: '#8b98ad',
+  textOnLeaf: '#e9f1ff',
+  textOnInternal: '#e8e2ff',
 
   leaf: '#1f6feb',
   leafDim: '#123a72',
   internal: '#7c5cff',
   internalDim: '#3d2d80',
   root: '#00b8a3',
-
   slotEmpty: '#1a2233',
   slotFilled: '#2f81f7',
   slotFilledInternal: '#9b7cff',
@@ -27,7 +128,6 @@ export const PALETTE = {
   split: '#39d353',
   merge: '#ff7b72',
   lock: '#a371f7',
-  /** 回表连线：二级索引 → 聚簇索引。 */
   lookup: '#f778ba',
   resident: '#39c5cf',
   selected: '#ffffff',
@@ -36,69 +136,326 @@ export const PALETTE = {
   edgeChildActive: '#e3b341',
   edgeSibling: '#1f3b34',
 
-  // —— PostgreSQL 堆表 / MVCC ——
-  /** 堆页外框（无序数据页，与 B+ 树页明显区分）。 */
   heapPage: '#2d3f5e',
-  /** 活元组：当前快照能看见的版本。 */
   tupleLive: '#2ea043',
-  /** 死元组：已被打上 xmax，等 VACUUM 回收 —— 表膨胀的来源。 */
   tupleDead: '#8b3a34',
-  /** 行指针重定向（HOT 链被剪枝后留下的指针）。 */
   tupleRedirect: '#d29922',
-  /** 空闲行指针，可被新版本复用。 */
   tupleUnused: '#1a2233',
-  /** 可见性映射里被标成 all-visible 的页，Index Only Scan 可跳过它。 */
   allVisible: '#00b8a3',
-  /** 版本链 t_ctid 连线。 */
   versionChain: '#f778ba',
-  /** HOT 链：新版本不写索引，用不同颜色区分。 */
   hotChain: '#39d353',
-  /** 索引项 → 堆元组的一跳。 */
   heapFetch: '#58a6ff',
 
-  // —— LSM-Tree ——
   memtable: '#00b8a3',
   memtableFrozen: '#0f8f86',
-  /** 各层 SST 的底色，越往下越冷。 */
+  memtableShell: '#16283a',
   sstLevel: ['#2f81f7', '#7c5cff', '#a371f7', '#c77dff', '#6b7a91'],
-  /** 正在参与压实的文件。 */
   compacting: '#db6d28',
-  /** 墓碑占比的提示色。 */
   tombstone: '#f85149',
-  /** 布隆过滤器成功挡掉一个文件。 */
   bloomSkip: '#39d353',
-} as const;
+};
 
-/** 第 n 层 SST 的颜色（超出预设长度则复用最后一个）。 */
-export function levelColor(level: number): string {
-  const palette = PALETTE.sstLevel;
-  return palette[Math.min(level, palette.length - 1)];
+/**
+ * ② 石板 —— 蓝灰底，比深空亮一档。
+ *
+ * 纯黑背景配高亮度色块时边缘对比过强，久看会「割眼」；
+ * 把底色抬起来、同时把结构色调亮一点，整体柔和不少。
+ */
+const SLATE: PaletteShape = {
+  ...DEEP,
+  background: '#1a2130',
+  grid: '#2a3446',
+  gridSection: '#3a4760',
+  skyLight: '#a8c4ff',
+  groundLight: '#232c3d',
+  fillLight: '#8f74ff',
+
+  textPrimary: '#eef3fa',
+  textSecondary: '#e2eaf6',
+  textMuted: '#9aa8be',
+
+  leaf: '#3b82f6',
+  leafDim: '#1e4b8f',
+  internal: '#8b6cff',
+  internalDim: '#4a3a94',
+  root: '#14b8a6',
+  slotEmpty: '#2b3648',
+  slotFilled: '#5b9cf8',
+  slotFilledInternal: '#a892ff',
+
+  edgeChild: '#3d4c66',
+  edgeSibling: '#2c4a42',
+
+  heapPage: '#3a4d6e',
+  tupleUnused: '#2b3648',
+  memtableShell: '#243449',
+  sstLevel: ['#3b82f6', '#8b6cff', '#b088ff', '#d09bff', '#8593ab'],
+};
+
+/**
+ * ③ 暖夜 —— 暖褐灰底、低蓝光，夜间久看更舒服。
+ * 语义色同步往暖里挪一点，避免冷色压在暖底上发脏。
+ */
+const WARM: PaletteShape = {
+  ...DEEP,
+  background: '#1c1a17',
+  grid: '#2e2924',
+  gridSection: '#413a32',
+  skyLight: '#ffd9a8',
+  groundLight: '#241f1a',
+  fillLight: '#c98cff',
+
+  textPrimary: '#f5efe6',
+  textSecondary: '#ece3d6',
+  textMuted: '#a99c8b',
+  textOnLeaf: '#fff4e6',
+  textOnInternal: '#f3e8ff',
+
+  leaf: '#3f83d8',
+  leafDim: '#274c78',
+  internal: '#a274e8',
+  internalDim: '#4e3a72',
+  root: '#1fae94',
+  slotEmpty: '#2e2924',
+  slotFilled: '#5d9ae8',
+  slotFilledInternal: '#bb98f5',
+
+  insert: '#4fa85c',
+  update: '#e0a53c',
+  remove: '#e8624f',
+  searchPath: '#f0bc55',
+  hit: '#f5d778',
+  dirty: '#e07f3a',
+  evict: '#e8624f',
+  split: '#5cc76b',
+  merge: '#f08a7d',
+  lookup: '#f58bc0',
+  resident: '#4bc6c0',
+
+  edgeChild: '#4a423a',
+  edgeChildActive: '#f0bc55',
+  edgeSibling: '#3a4438',
+
+  heapPage: '#3e372f',
+  tupleLive: '#4fa85c',
+  tupleDead: '#8f4438',
+  tupleRedirect: '#e0a53c',
+  tupleUnused: '#2e2924',
+  allVisible: '#1fae94',
+  versionChain: '#f58bc0',
+  hotChain: '#5cc76b',
+  heapFetch: '#6bb0f5',
+
+  memtable: '#1fae94',
+  memtableFrozen: '#178a78',
+  memtableShell: '#2b2b28',
+  sstLevel: ['#3f83d8', '#a274e8', '#c08ef0', '#dba6f5', '#a99c8b'],
+  compacting: '#e07f3a',
+  tombstone: '#e8624f',
+  bloomSkip: '#5cc76b',
+};
+
+/**
+ * ④ 日光 —— 真正的浅色主题：白纸底、深色文字。
+ *
+ * 注意这**不是简单反色**：为暗背景挑的那些亮色压在白底上会糊成一片，
+ * 所有结构色都重新加深加饱和过。
+ */
+const LIGHT: PaletteShape = {
+  background: '#eef1f6',
+  grid: '#c9d2e0',
+  gridSection: '#aab6c9',
+  skyLight: '#ffffff',
+  groundLight: '#dfe5ee',
+  fillLight: '#b9a8ff',
+
+  textPrimary: '#111823',
+  textSecondary: '#222d3d',
+  textMuted: '#5a6577',
+  textOnLeaf: '#ffffff',
+  textOnInternal: '#ffffff',
+
+  leaf: '#1d4ed8',
+  leafDim: '#93b4f0',
+  internal: '#6d28d9',
+  internalDim: '#c4b0f0',
+  root: '#0f766e',
+  slotEmpty: '#cbd3e0',
+  slotFilled: '#2563eb',
+  slotFilledInternal: '#7c3aed',
+
+  insert: '#15803d',
+  update: '#b45309',
+  remove: '#b91c1c',
+  searchPath: '#b45309',
+  hit: '#a16207',
+  dirty: '#c2410c',
+  evict: '#b91c1c',
+  split: '#15803d',
+  merge: '#c2410c',
+  lock: '#7c3aed',
+  lookup: '#be185d',
+  resident: '#0e7490',
+  selected: '#0b1220',
+
+  edgeChild: '#98a6ba',
+  edgeChildActive: '#b45309',
+  edgeSibling: '#7fae9e',
+
+  heapPage: '#9fb0c9',
+  tupleLive: '#15803d',
+  tupleDead: '#c26a63',
+  tupleRedirect: '#b45309',
+  tupleUnused: '#cbd3e0',
+  allVisible: '#0f766e',
+  versionChain: '#be185d',
+  hotChain: '#15803d',
+  heapFetch: '#1d4ed8',
+
+  memtable: '#0f766e',
+  memtableFrozen: '#115e59',
+  memtableShell: '#d6dde8',
+  sstLevel: ['#1d4ed8', '#6d28d9', '#8b5cf6', '#a78bfa', '#64748b'],
+  compacting: '#c2410c',
+  tombstone: '#b91c1c',
+  bloomSkip: '#15803d',
+};
+
+export const THEMES: Record<ThemeId, PaletteShape> = {
+  deep: DEEP,
+  slate: SLATE,
+  warm: WARM,
+  light: LIGHT,
+};
+
+export interface ThemeMeta {
+  id: ThemeId;
+  label: string;
+  hint: string;
+  /** 主题选择器上的小色卡：背景 + 两个代表色。 */
+  swatch: [string, string, string];
+  dark: boolean;
 }
 
-export type PaletteKey = keyof typeof PALETTE;
+export const THEME_LIST: ThemeMeta[] = [
+  {
+    id: 'slate',
+    label: '石板',
+    hint: '蓝灰底，比深空亮一档，久看不割眼',
+    swatch: [SLATE.background, SLATE.leaf, SLATE.root],
+    dark: true,
+  },
+  {
+    id: 'deep',
+    label: '深空',
+    hint: '近黑背景，对比最强，适合暗房与录屏',
+    swatch: [DEEP.background, DEEP.leaf, DEEP.root],
+    dark: true,
+  },
+  {
+    id: 'warm',
+    label: '暖夜',
+    hint: '暖褐灰底、低蓝光，夜间阅读更舒服',
+    swatch: [WARM.background, WARM.leaf, WARM.root],
+    dark: true,
+  },
+  {
+    id: 'light',
+    label: '日光',
+    hint: '白纸底深色字，适合白天、投影与截图',
+    swatch: [LIGHT.background, LIGHT.leaf, LIGHT.root],
+    dark: false,
+  },
+];
 
-/** 高亮语义 → 颜色。可视化组件按最近事件为页/槽位打上这些标记。 */
+/** 默认主题。选石板而不是纯黑：长时间盯屏更舒服。 */
+export const DEFAULT_THEME: ThemeId = 'slate';
+
+/** 当前生效的调色板。**活对象**，不要解构后长期持有。 */
+export const PALETTE: PaletteShape = { ...THEMES[DEFAULT_THEME] };
+
+let currentTheme: ThemeId = DEFAULT_THEME;
+
+export function currentThemeId(): ThemeId {
+  return currentTheme;
+}
+
+export function isValidTheme(id: string | null | undefined): id is ThemeId {
+  return typeof id === 'string' && id in THEMES;
+}
+
+/**
+ * 切换主题：就地覆盖 `PALETTE`，下一帧渲染即生效。
+ *
+ * 调用方还需要清一次文字贴图缓存（贴图把颜色烘进了像素），并让 React 重画一次。
+ */
+export function applyTheme(id: ThemeId): PaletteShape {
+  currentTheme = id;
+  Object.assign(PALETTE, THEMES[id]);
+  return PALETTE;
+}
+
+export type PaletteKey = keyof PaletteShape;
+
+/**
+ * 高亮语义 → 颜色。
+ *
+ * 这里必须是 **getter**：`PALETTE` 会被就地覆盖，
+ * 若在模块加载时把值拷成常量，换主题后高亮就还是旧颜色。
+ */
 export const HIGHLIGHT_COLOR = {
-  insert: PALETTE.insert,
-  update: PALETTE.update,
-  delete: PALETTE.remove,
-  path: PALETTE.searchPath,
-  hit: PALETTE.hit,
-  split: PALETTE.split,
-  merge: PALETTE.merge,
-  evict: PALETTE.evict,
-  dirty: PALETTE.dirty,
-  alloc: PALETTE.split,
-  scan: PALETTE.resident,
-  lookup: PALETTE.lookup,
+  get insert() {
+    return PALETTE.insert;
+  },
+  get update() {
+    return PALETTE.update;
+  },
+  get delete() {
+    return PALETTE.remove;
+  },
+  get path() {
+    return PALETTE.searchPath;
+  },
+  get hit() {
+    return PALETTE.hit;
+  },
+  get split() {
+    return PALETTE.split;
+  },
+  get merge() {
+    return PALETTE.merge;
+  },
+  get evict() {
+    return PALETTE.evict;
+  },
+  get dirty() {
+    return PALETTE.dirty;
+  },
+  get alloc() {
+    return PALETTE.split;
+  },
+  get scan() {
+    return PALETTE.resident;
+  },
+  get lookup() {
+    return PALETTE.lookup;
+  },
   /** MVCC：写了一个新版本 / 给旧版本打 xmax。 */
-  version: PALETTE.versionChain,
+  get version() {
+    return PALETTE.versionChain;
+  },
   /** VACUUM 清理。 */
-  vacuum: PALETTE.allVisible,
+  get vacuum() {
+    return PALETTE.allVisible;
+  },
   /** 索引 → 堆的一跳。 */
-  fetch: PALETTE.heapFetch,
+  get fetch() {
+    return PALETTE.heapFetch;
+  },
   /** LSM 压实。 */
-  compact: PALETTE.compacting,
+  get compact() {
+    return PALETTE.compacting;
+  },
 } as const;
 
 export type HighlightKind = keyof typeof HIGHLIGHT_COLOR;
@@ -122,3 +479,9 @@ export const HIGHLIGHT_DECAY_MS: Record<HighlightKind, number> = {
   fetch: 1800,
   compact: 2400,
 };
+
+/** 第 n 层 SST 的颜色（超出预设长度则复用最后一个）。 */
+export function levelColor(level: number): string {
+  const palette = PALETTE.sstLevel;
+  return palette[Math.min(level, palette.length - 1)];
+}

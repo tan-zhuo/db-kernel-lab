@@ -1,6 +1,7 @@
 import { Camera, Download, Eye, Fullscreen, Loader2, RotateCcw, Type } from 'lucide-react';
 import { useCapability, useSimStore } from '@/state/store';
 import { captureScreenshot } from '@/components/scene/SceneRoot';
+import { ThemePicker } from '@/components/ThemePicker';
 
 export function TopBar() {
   const status = useSimStore((s) => s.status);
@@ -15,7 +16,7 @@ export function TopBar() {
   return (
     <header className="flex items-center gap-3 border-b border-ink-700 bg-ink-900 px-3 py-2">
       <div className="flex items-baseline gap-2">
-        <span className="text-[15px] font-semibold tracking-tight text-white">DB Kernel Lab</span>
+        <span className="text-[15px] font-semibold tracking-tight text-strong">DB Kernel Lab</span>
         <span className="text-[11px] text-mute-400">数据库内核可视化实验室 · InnoDB / PostgreSQL / LSM</span>
       </div>
       <span className="rounded border border-ink-600 bg-ink-850 px-1.5 py-0.5 text-[10px] text-teal-500">
@@ -43,6 +44,7 @@ export function TopBar() {
       >
         <Type size={13} />
       </button>
+      <ThemePicker />
       <button className="dbkl-btn" onClick={() => store.getState().focusPage(null)} title="适应视图 (G)">
         <Fullscreen size={13} />
       </button>

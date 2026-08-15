@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { PALETTE } from '@dbkl/visualization';
 
 /**
  * 画布文字贴图缓存。
@@ -65,12 +66,12 @@ export function labelTexture(key: string, style: LabelStyle): THREE.CanvasTextur
 
   if (style.title) {
     ctx.font = `600 ${Math.round(34 * scale)}px ui-monospace, SFMono-Regular, Menlo, monospace`;
-    ctx.fillStyle = style.titleColor ?? '#8b98ad';
+    ctx.fillStyle = style.titleColor ?? PALETTE.textMuted;
     ctx.fillText(style.title, x, style.body ? height * 0.3 : height * 0.5, width - 24);
   }
   if (style.body) {
     ctx.font = `700 ${Math.round(40 * scale)}px ui-monospace, SFMono-Regular, Menlo, monospace`;
-    ctx.fillStyle = style.bodyColor ?? '#e6edf3';
+    ctx.fillStyle = style.bodyColor ?? PALETTE.textPrimary;
     ctx.fillText(style.body, x, style.title ? height * 0.72 : height * 0.5, width - 24);
   }
 

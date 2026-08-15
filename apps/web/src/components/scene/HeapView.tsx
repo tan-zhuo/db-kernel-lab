@@ -11,7 +11,7 @@ import {
 } from '@dbkl/visualization';
 import { formatTid } from '@dbkl/shared';
 import { labelTexture } from '@/lib/label-texture';
-import { highlightTracker, useLabState, useSimStore } from '@/state/store';
+import { highlightTracker, useLabState, useSimStore, useThemeVersion } from '@/state/store';
 
 const LERP_RATE = 9;
 const ARC_SEGMENTS = 36;
@@ -104,7 +104,7 @@ export function HeapView({ treeLayout }: { treeLayout: TreeLayout }) {
       tmpObject.updateMatrix();
       tm.setMatrixAt(i, tmpObject.matrix);
 
-      baseColor.set(TUPLE_COLOR[t.state]);
+      baseColor.set(tupleColor(t.state));
       const h = highlightTracker.slot(t.pageId, t.slot, now);
       if (h) baseColor.lerp(tmpColor.set(HIGHLIGHT_COLOR[h[0]]), 0.3 + 0.7 * h[1]);
       tm.setColorAt(i, baseColor);
@@ -167,16 +167,28 @@ export function HeapView({ treeLayout }: { treeLayout: TreeLayout }) {
   );
 }
 
-const TUPLE_COLOR: Record<string, string> = {
-  live: PALETTE.tupleLive,
-  dead: PALETTE.tupleDead,
-  redirect: PALETTE.tupleRedirect,
-  unused: PALETTE.tupleUnused,
-  aborted: PALETTE.remove,
-};
+/**
+ * 元组状态 → 颜色。必须是**函数**而不是常量表：
+ * PALETTE 会被就地覆盖，查表常量会把启动时那套颜色永久冻住。
+ */
+function tupleColor(state: string): string {
+  switch (state) {
+    case 'live':
+      return PALETTE.tupleLive;
+    case 'dead':
+      return PALETTE.tupleDead;
+    case 'redirect':
+      return PALETTE.tupleRedirect;
+    case 'unused':
+      return PALETTE.tupleUnused;
+    default:
+      return PALETTE.remove;
+  }
+}
 
 /** t_ctid 版本链：旧版本 → 新版本。HOT 链另用绿色，因为它不需要改索引。 */
 function VersionChains({ layout }: { layout: HeapLayout }) {
+  const theme = useThemeVersion();
   const { positions, colors, count } = useMemo(() => {
     const edges = layout.versionEdges;
     const pos = new Float32Array(Math.max(1, edges.length) * 6);
@@ -194,7 +206,9 @@ function VersionChains({ layout }: { layout: HeapLayout }) {
       n++;
     }
     return { positions: pos, colors: col, count: n };
-  }, [layout]);
+    // theme 进依赖：换主题要重算顶点色
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layout, theme]);
 
   if (count === 0) return null;
   return (
@@ -289,7 +303,7 @@ function HeapLabels({ layout }: { layout: HeapLayout }) {
             title: '堆文件（无序数据页）',
             body: `${layout.pages.length} 个堆页 · 索引项只存 TID，取行必须回堆`,
             titleColor: PALETTE.tupleLive,
-            bodyColor: '#dbe6f5',
+            bodyColor: PALETTE.textSecondary,
             width: 900,
             height: 150,
             fontScale: 0.9,
@@ -311,7 +325,7 @@ function HeapLabels({ layout }: { layout: HeapLayout }) {
             toneMapped={false}
             map={labelTexture(`heap-${box.pageId}|${box.used}|${box.slots}|${box.allVisible}`, {
               body: `blk ${box.blockNo} · #${box.pageId} · ${box.used}/${box.slots}${box.allVisible ? ' · AV' : ''}`,
-              bodyColor: box.allVisible ? PALETTE.allVisible : '#8b98ad',
+              bodyColor: box.allVisible ? PALETTE.allVisible : PALETTE.textMuted,
               width: 420,
               height: 72,
               fontScale: 0.8,

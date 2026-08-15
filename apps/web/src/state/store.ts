@@ -15,7 +15,14 @@ import {
   type LabState,
   type SimulationEvent,
 } from '@dbkl/simulation-core';
-import { HighlightTracker } from '@dbkl/visualization';
+import {
+  DEFAULT_THEME,
+  HighlightTracker,
+  applyTheme,
+  isValidTheme,
+  type ThemeId,
+} from '@dbkl/visualization';
+import { clearLabelCache } from '@/lib/label-texture';
 import { SimulationClient } from '@/lib/worker-client';
 import { CURRENT_SESSION_ID, createDebouncedSaver, loadSession, type SessionRecord } from '@/lib/persistence';
 import { hideBootScreen, setBootStep } from '@/lib/boot-screen';
@@ -59,6 +66,10 @@ export interface SimStore {
   capabilities: readonly string[];
   showBufferPool: boolean;
   showLabels: boolean;
+  /** 当前配色主题。UI 与 3D 场景共用一套。 */
+  theme: ThemeId;
+  /** 每次换主题自增：让缓存了颜色的组件重算。 */
+  themeVersion: number;
 
   boot(): Promise<void>;
   run(command: Command): Promise<void>;
@@ -82,6 +93,7 @@ export interface SimStore {
   /** 请求相机聚焦：传页号则飞向该页，传 null 则适应整棵树。 */
   focusPage(pageId: PageId | null): void;
   setConfig(patch: Partial<EngineConfig>): void;
+  setTheme(theme: ThemeId): void;
   toggleBufferPool(): void;
   toggleLabels(): void;
   exportEvents(): void;
@@ -113,6 +125,8 @@ export const useSimStore = create<SimStore>()((set, get) => ({
   capabilities: [],
   showBufferPool: true,
   showLabels: true,
+  theme: readStoredTheme(),
+  themeVersion: 0,
 
   async boot() {
     if (get().booted) return;
@@ -390,6 +404,12 @@ export const useSimStore = create<SimStore>()((set, get) => ({
     set({ config: { ...get().config, ...patch } });
   },
 
+  setTheme(theme) {
+    if (theme === get().theme) return;
+    applyThemeEverywhere(theme);
+    set({ theme, themeVersion: get().themeVersion + 1, version: get().version + 1 });
+  },
+
   toggleBufferPool() {
     set({ showBufferPool: !get().showBufferPool });
   },
@@ -470,6 +490,45 @@ export function useLabState(): LabState {
   return useSimStore.getState().state;
 }
 
+const THEME_STORAGE_KEY = 'dbkl-theme';
+
+/**
+ * 读取已保存的主题。
+ *
+ * 主题是纯 UI 偏好，与实验数据无关，所以用 localStorage 而不是 IndexedDB ——
+ * 它必须在首帧之前同步读到，否则会闪一下默认色。
+ */
+function readStoredTheme(): ThemeId {
+  try {
+    const saved = localStorage.getItem(THEME_STORAGE_KEY);
+    if (isValidTheme(saved)) return saved;
+  } catch {
+    // 隐私模式可能禁用 localStorage，回落默认主题即可。
+  }
+  return DEFAULT_THEME;
+}
+
+/**
+ * 把主题同时应用到三处：CSS 变量（data-theme）、3D 调色板、以及文字贴图缓存。
+ *
+ * 文字贴图把颜色**烘进了像素**，不清缓存的话换主题后场景里的标签会保持旧色。
+ */
+function applyThemeEverywhere(theme: ThemeId): void {
+  applyTheme(theme);
+  clearLabelCache();
+  if (typeof document !== 'undefined') {
+    document.documentElement.dataset.theme = theme;
+  }
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, theme);
+  } catch {
+    // 存不下就算了，下次回落默认主题。
+  }
+}
+
+// 模块加载即生效，避免 React 挂载前先闪一帧默认配色。
+applyThemeEverywhere(readStoredTheme());
+
 /** 只订阅 version，用于需要「每次状态推进都重画」的组件。 */
 export function useVersion(): number {
   return useSimStore((s) => s.version);
@@ -483,6 +542,11 @@ export function useVersion(): number {
  */
 export function useCapability(capability: EngineCapability): boolean {
   return useSimStore((s) => s.capabilities.includes(capability));
+}
+
+/** 订阅主题变更：给那些把颜色缓存进 useMemo 的组件当依赖用。 */
+export function useThemeVersion(): number {
+  return useSimStore((s) => s.themeVersion);
 }
 
 /** rAF 播放驱动：挂在应用根组件上。 */

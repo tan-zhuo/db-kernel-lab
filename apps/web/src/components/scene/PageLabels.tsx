@@ -65,7 +65,7 @@ export function PageLabels({ layout, anim }: { layout: TreeLayout; anim: RefObje
           title,
           body,
           titleColor: page.dirty ? PALETTE.dirty : '#93a4bd',
-          bodyColor: node.type === 'leaf' ? '#e9f1ff' : '#e8e2ff',
+          bodyColor: node.type === 'leaf' ? PALETTE.textOnLeaf : PALETTE.textOnInternal,
           width: 512,
           height: 140,
           fontScale: node.capacity > 8 ? 0.8 : 1,

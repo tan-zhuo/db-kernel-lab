@@ -39,7 +39,7 @@ export function IndexTitles({ layout }: { layout: TreeLayout }) {
                 title: ix.clustered ? '聚簇索引（表数据）' : '二级索引',
                 body: `${ix.name} (${ix.column}) · ${ix.entries} 条 · 树高 ${ix.height} · ${g.pages} 页`,
                 titleColor: ix.clustered ? PALETTE.root : PALETTE.internal,
-                bodyColor: '#dbe6f5',
+                bodyColor: PALETTE.textSecondary,
                 width: 768,
                 height: 168,
                 fontScale: 0.95,

@@ -219,7 +219,7 @@ function MemtableBox({ layout }: { layout: LsmLayout }) {
       {/* 容器本体：即使是空的也要看得见，它是「写入先落到哪里」的锚点 */}
       <mesh>
         <boxGeometry args={[mem.width, mem.height, mem.depth]} />
-        <meshStandardMaterial color="#16283a" roughness={0.7} metalness={0.05} />
+        <meshStandardMaterial color={PALETTE.memtableShell} roughness={0.7} metalness={0.05} />
       </mesh>
       <lineSegments>
         <edgesGeometry args={[new THREE.BoxGeometry(mem.width, mem.height, mem.depth)]} />
@@ -268,7 +268,7 @@ function LevelLabels({ layout }: { layout: LsmLayout }) {
             title: `MEMTABLE ${mem.entries}/${mem.limit}${mem.frozen > 0 ? ` · 冻结 ${mem.frozen}` : ''}`,
             body: `WAL 待恢复 ${retained} 条${backlog > 0 ? ` · 后台积压 ${backlog}` : ''}${stalls > 0 ? ` · 写停顿 ${stalls}` : ''}`,
             titleColor: PALETTE.memtable,
-            bodyColor: '#dbe6f5',
+            bodyColor: PALETTE.textSecondary,
             width: 900,
             height: 150,
             fontScale: 0.86,
@@ -296,7 +296,7 @@ function LevelLabels({ layout }: { layout: LsmLayout }) {
                   ? `${level.files} 个文件（区间重叠）`
                   : `${level.files} 个文件 · ${level.entries}/${Math.round(level.capacity)}`,
               titleColor: levelColor(level.level),
-              bodyColor: '#8b98ad',
+              bodyColor: PALETTE.textMuted,
               width: 520,
               height: 128,
               fontScale: 0.86,
@@ -317,7 +317,7 @@ function LevelLabels({ layout }: { layout: LsmLayout }) {
           toneMapped={false}
           map={labelTexture(`lsm-axis|${layout.keyRange.min}|${layout.keyRange.max}`, {
             body: `← 键空间 ${layout.keyRange.min} … ${layout.keyRange.max} →  （砖块宽度 = 该文件覆盖的键区间）`,
-            bodyColor: '#6b7a91',
+            bodyColor: PALETTE.textMuted,
             width: 1100,
             height: 90,
             fontScale: 0.78,

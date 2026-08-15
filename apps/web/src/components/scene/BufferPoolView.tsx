@@ -120,8 +120,8 @@ export function BufferPoolView({ layout }: { layout: TreeLayout }) {
                   {
                     title: `frame ${i}`,
                     body: pageId === null ? '—' : `#${pageId}${page?.dirty ? ' ·脏' : ''}`,
-                    titleColor: '#6b7a91',
-                    bodyColor: pageId === null ? '#3d4757' : page?.dirty ? '#ffc08a' : '#c8f5ff',
+                    titleColor: PALETTE.textMuted,
+                    bodyColor: pageId === null ? PALETTE.slotEmpty : page?.dirty ? PALETTE.dirty : PALETTE.resident,
                     width: 320,
                     height: 160,
                     fontScale: 1.15,
