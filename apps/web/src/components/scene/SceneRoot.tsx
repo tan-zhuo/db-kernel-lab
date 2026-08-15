@@ -2,10 +2,12 @@ import { useEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { Grid, OrbitControls } from '@react-three/drei';
-import { PALETTE, layoutTree, type TreeLayout } from '@dbkl/visualization';
-import { useLabState, useSimStore } from '@/state/store';
+import { PALETTE, layoutHeap, layoutLsm, layoutTree, type TreeLayout } from '@dbkl/visualization';
+import { useCapability, useLabState, useSimStore } from '@/state/store';
 import { BTreeView } from './BTreeView';
 import { BufferPoolView, bufferPoolExtent } from './BufferPoolView';
+import { HeapView } from './HeapView';
+import { LsmView } from './LsmView';
 
 /** 供「导出截图」使用的渲染器引用（在 Canvas 内部登记）。 */
 let glRef: THREE.WebGLRenderer | null = null;
@@ -49,16 +51,51 @@ export function SceneRoot() {
   );
 }
 
+/**
+ * 场景内容按**引擎能力**组装，而不是按引擎名字：
+ *
+ *  - `btree` → B+ 树森林（InnoDB 的聚簇/二级索引，PostgreSQL 的索引）
+ *  - `heap`  → 树下方的堆文件 + 版本链 + 索引→堆的弧线
+ *  - `lsm`   → MemTable + 分层 SST（此时没有树，独占整个视口）
+ *  - `buffer-pool` → 右侧的缓冲池货架
+ *
+ * 第三方引擎只要声明同样的能力，就能直接复用这些视图。
+ */
 function SceneContent() {
   const state = useLabState();
   const showBufferPool = useSimStore((s) => s.showBufferPool);
-  // 布局只算一次，B+ 树视图与缓冲池视图共用（缓冲池要按树的包围盒定位）。
+  const hasBTree = useCapability('btree');
+  const hasHeap = useCapability('heap');
+  const hasLsm = useCapability('lsm');
+  const hasBufferPool = useCapability('buffer-pool');
+
+  // 布局只算一次，B+ 树视图、堆视图与缓冲池视图共用。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const layout = useMemo(() => layoutTree(state), [state, state.appliedSeq, state.config]);
 
-  // 「适应视图」要把缓冲池面板也框进来，否则它会长期停在画面之外。
+  // 「适应视图」要把堆文件与缓冲池面板也框进来，否则它们会长期停在画面之外。
   const bounds = useMemo(() => {
     const b = { ...layout.bounds };
-    if (!showBufferPool) return b;
+    if (hasHeap) {
+      const heap = layoutHeap(state, layout);
+      if (heap.pages.length > 0) {
+        b.minX = Math.min(b.minX, heap.bounds.minX);
+        b.maxX = Math.max(b.maxX, heap.bounds.maxX);
+        b.minY = Math.min(b.minY, heap.bounds.minY);
+        b.maxY = Math.max(b.maxY, heap.bounds.maxY);
+      }
+    }
+    if (hasLsm && state.lsm) {
+      const lsm = layoutLsm(state.lsm);
+      // 左侧的层标签画在 bounds 之外，「适应视图」要把它们一起框进来。
+      return {
+        minX: lsm.bounds.minX - 7,
+        maxX: lsm.bounds.maxX + 1,
+        minY: lsm.bounds.minY - 1.5,
+        maxY: lsm.bounds.maxY + 2.5,
+      };
+    }
+    if (!showBufferPool || !hasBufferPool) return b;
     const bp = bufferPoolExtent(layout, state.buffer.frames.length);
     return {
       minX: Math.min(b.minX, bp.minX),
@@ -66,7 +103,8 @@ function SceneContent() {
       minY: Math.min(b.minY, bp.minY),
       maxY: Math.max(b.maxY, bp.maxY),
     };
-  }, [layout, showBufferPool, state.buffer.frames.length]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layout, showBufferPool, hasBufferPool, hasHeap, hasLsm, state, state.buffer.frames.length]);
 
   // 雾必须跟着场景尺度走：索引变多之后树会横向铺开很远，
   // 固定的雾距会把整个森林都吃掉（画面全黑）。
@@ -75,8 +113,10 @@ function SceneContent() {
   return (
     <>
       <fog attach="fog" args={[PALETTE.background, span * 0.9, span * 3.6]} />
-      <BTreeView layout={layout} />
-      {showBufferPool && <BufferPoolView layout={layout} />}
+      {hasBTree && <BTreeView layout={layout} />}
+      {hasHeap && <HeapView treeLayout={layout} />}
+      {hasLsm && <LsmView />}
+      {hasBufferPool && showBufferPool && <BufferPoolView layout={layout} />}
       <CameraRig layout={layout} bounds={bounds} />
     </>
   );

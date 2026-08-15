@@ -11,7 +11,7 @@ import {
   StepBack,
   StepForward,
 } from 'lucide-react';
-import { useSimStore } from '@/state/store';
+import { useCapability, useSimStore } from '@/state/store';
 
 const SPEEDS = [0.1, 0.25, 0.5, 1, 2, 4, 8];
 /** 轨道上最多绘制的关键帧刻度，超出则抽样。 */
@@ -31,6 +31,8 @@ export function Timeline() {
   const speed = useSimStore((s) => s.speed);
   const markers = useSimStore((s) => s.markers);
   const loop = useSimStore((s) => s.loop);
+  const hasLsm = useCapability('lsm');
+  const hasHeap = useCapability('heap');
   const store = useSimStore;
   const trackRef = useRef<HTMLDivElement>(null);
   const dragging = useRef<'cursor' | 'loop' | null>(null);
@@ -48,13 +50,16 @@ export function Timeline() {
       width: Math.max(0.25, pct(s.endSeq - s.startSeq + 1)),
       ok: s.ok,
     }));
+    // 每种引擎的「值得停下来看」的时刻不同：树是分裂/合并，堆表是 VACUUM/事务边界，LSM 是刷写/压实。
     const found: { index: number; kind: 'split' | 'merge' | 'evict' | 'root' }[] = [];
     for (let i = 0; i < history.length; i++) {
       const e = history.at(i)!;
-      if (e.type === 'PAGE_SPLIT') found.push({ index: i, kind: 'split' });
-      else if (e.type === 'PAGE_MERGE' || e.type === 'REDISTRIBUTE') found.push({ index: i, kind: 'merge' });
-      else if (e.type === 'BUFFER_EVICT') found.push({ index: i, kind: 'evict' });
-      else if (e.type === 'ROOT_CHANGE') found.push({ index: i, kind: 'root' });
+      if (e.type === 'PAGE_SPLIT' || e.type === 'SST_CREATE') found.push({ index: i, kind: 'split' });
+      else if (e.type === 'PAGE_MERGE' || e.type === 'REDISTRIBUTE' || e.type === 'COMPACTION_BEGIN')
+        found.push({ index: i, kind: 'merge' });
+      else if (e.type === 'BUFFER_EVICT' || e.type === 'TXN_ABORT') found.push({ index: i, kind: 'evict' });
+      else if (e.type === 'ROOT_CHANGE' || e.type === 'VACUUM_END' || e.type === 'TXN_COMMIT')
+        found.push({ index: i, kind: 'root' });
     }
     const step = Math.ceil(found.length / MAX_TICKS);
     return { spans: spanList, ticks: step > 1 ? found.filter((_, i) => i % step === 0) : found };
@@ -181,20 +186,51 @@ export function Timeline() {
 
         <div className="mx-1 h-5 w-px bg-ink-600" />
 
-        <button
-          className="dbkl-btn"
-          title="跳到下一次页分裂"
-          onClick={() => store.getState().jumpToEvent((e) => e.type === 'PAGE_SPLIT', 1)}
-        >
-          下一次分裂
-        </button>
-        <button
-          className="dbkl-btn"
-          title="跳到下一次缓冲池淘汰"
-          onClick={() => store.getState().jumpToEvent((e) => e.type === 'BUFFER_EVICT', 1)}
-        >
-          下一次淘汰
-        </button>
+        {hasLsm ? (
+          <>
+            <button
+              className="dbkl-btn"
+              title="跳到下一次 MemTable 刷写"
+              onClick={() => store.getState().jumpToEvent((e) => e.type === 'MEMTABLE_FREEZE', 1)}
+            >
+              下一次刷写
+            </button>
+            <button
+              className="dbkl-btn"
+              title="跳到下一次压实"
+              onClick={() => store.getState().jumpToEvent((e) => e.type === 'COMPACTION_BEGIN', 1)}
+            >
+              下一次压实
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              className="dbkl-btn"
+              title="跳到下一次页分裂"
+              onClick={() => store.getState().jumpToEvent((e) => e.type === 'PAGE_SPLIT', 1)}
+            >
+              下一次分裂
+            </button>
+            {hasHeap ? (
+              <button
+                className="dbkl-btn"
+                title="跳到下一次 VACUUM"
+                onClick={() => store.getState().jumpToEvent((e) => e.type === 'VACUUM_BEGIN', 1)}
+              >
+                下一次 VACUUM
+              </button>
+            ) : (
+              <button
+                className="dbkl-btn"
+                title="跳到下一次缓冲池淘汰"
+                onClick={() => store.getState().jumpToEvent((e) => e.type === 'BUFFER_EVICT', 1)}
+              >
+                下一次淘汰
+              </button>
+            )}
+          </>
+        )}
 
         <div className="num ml-auto flex items-center gap-3 text-[11px] text-mute-400">
           <span className="max-w-[280px] truncate text-mute-300">{currentSpan?.label ?? '—'}</span>

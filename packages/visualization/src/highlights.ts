@@ -62,6 +62,52 @@ export function highlightsForEvent(e: SimulationEvent): Highlight[] {
       return e.found && e.pageId !== null ? [{ pageId: e.pageId, slot: e.slot, kind: 'hit' }] : [];
     case 'SCAN_STEP':
       return [{ pageId: e.pageId, slot: e.slot, kind: 'scan' }];
+
+    // —— PostgreSQL 堆表 / MVCC ——
+    case 'HEAP_INSERT':
+      return [{ pageId: e.pageId, slot: e.slot, kind: 'insert' }];
+    case 'HEAP_SET_XMAX':
+      return [{ pageId: e.pageId, slot: e.slot, kind: 'version' }];
+    case 'LINE_POINTER':
+      return [{ pageId: e.pageId, slot: e.slot, kind: 'vacuum' }];
+    case 'HEAP_FETCH':
+      return [
+        { pageId: e.fromPageId, slot: e.fromSlot, kind: 'fetch' },
+        { pageId: e.tid.pageId, slot: e.tid.slot, kind: 'fetch' },
+      ];
+    case 'VISIBILITY_CHECK':
+      return [{ pageId: e.pageId, slot: e.slot, kind: e.visible ? 'hit' : 'path' }];
+    case 'HEAP_PRUNE':
+      return [
+        { pageId: e.pageId, slot: -1, kind: 'vacuum' },
+        ...e.removed.map((slot) => ({ pageId: e.pageId, slot, kind: 'vacuum' as const })),
+      ];
+    case 'VISIBILITY_MAP':
+      return [{ pageId: e.pageId, slot: -1, kind: 'vacuum' }];
+
+    default:
+      return [];
+  }
+}
+
+/**
+ * LSM 的高亮不按「页」组织（SST 是文件不是页），单独给一份文件级映射。
+ * 返回 [sstId, 语义]，由 LsmView 自己做衰减。
+ */
+export function lsmHighlightsForEvent(e: SimulationEvent): { sstId: string; kind: HighlightKind }[] {
+  switch (e.type) {
+    case 'SST_CREATE':
+      return [{ sstId: e.sstId, kind: 'alloc' }];
+    case 'SST_DROP':
+      return [{ sstId: e.sstId, kind: 'delete' }];
+    case 'COMPACTION_BEGIN':
+      return e.inputs.map((sstId) => ({ sstId, kind: 'compact' as const }));
+    case 'COMPACTION_END':
+      return e.outputs.map((sstId) => ({ sstId, kind: 'split' as const }));
+    case 'BLOOM_PROBE':
+      return [{ sstId: e.sstId, kind: e.maybe ? 'path' : 'vacuum' }];
+    case 'SST_PROBE':
+      return [{ sstId: e.sstId, kind: e.found ? 'hit' : 'scan' }];
     default:
       return [];
   }
@@ -83,9 +129,17 @@ interface Entry {
 export class HighlightTracker {
   private pages = new Map<PageId, Entry>();
   private slots = new Map<string, Entry>();
+  /** LSM 的高亮按文件 id 索引（SST 不是页）。 */
+  private ssts = new Map<string, Entry>();
 
   ingest(events: readonly SimulationEvent[], now: number): void {
     for (const e of events) {
+      for (const h of lsmHighlightsForEvent(e)) {
+        const prev = this.ssts.get(h.sstId);
+        if (!prev || priority(h.kind) >= priority(prev.kind) || now - prev.at > HIGHLIGHT_DECAY_MS[prev.kind]) {
+          this.ssts.set(h.sstId, { kind: h.kind, at: now, slot: -1 });
+        }
+      }
       for (const h of highlightsForEvent(e)) {
         const entry: Entry = { kind: h.kind, at: now, slot: h.slot };
         const prev = this.pages.get(h.pageId);
@@ -101,6 +155,7 @@ export class HighlightTracker {
   clear(): void {
     this.pages.clear();
     this.slots.clear();
+    this.ssts.clear();
   }
 
   /** 返回 [kind, 0..1 强度]，过期返回 null。 */
@@ -112,10 +167,15 @@ export class HighlightTracker {
     return read(this.slots.get(`${pageId}:${slot}`), now);
   }
 
+  sst(sstId: string, now: number): [HighlightKind, number] | null {
+    return read(this.ssts.get(sstId), now);
+  }
+
   /** 定期清理过期项，避免长实验下 Map 无限增长。 */
   prune(now: number): void {
     for (const [k, v] of this.pages) if (now - v.at > HIGHLIGHT_DECAY_MS[v.kind]) this.pages.delete(k);
     for (const [k, v] of this.slots) if (now - v.at > HIGHLIGHT_DECAY_MS[v.kind]) this.slots.delete(k);
+    for (const [k, v] of this.ssts) if (now - v.at > HIGHLIGHT_DECAY_MS[v.kind]) this.ssts.delete(k);
   }
 }
 
@@ -133,6 +193,10 @@ function priority(kind: HighlightKind): number {
     case 'merge':
     case 'evict':
     case 'lookup':
+    case 'version':
+    case 'vacuum':
+    case 'fetch':
+    case 'compact':
       return 3;
     case 'insert':
     case 'delete':

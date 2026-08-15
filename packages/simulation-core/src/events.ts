@@ -1,4 +1,16 @@
-import type { CommandKind, Key, PageId, PageType, Row, TableSchema } from '@dbkl/shared';
+import {
+  formatTid,
+  type CommandKind,
+  type IsolationLevel,
+  type Key,
+  type LinePointerState,
+  type PageId,
+  type PageType,
+  type Row,
+  type TableSchema,
+  type Tid,
+  type Txid,
+} from '@dbkl/shared';
 import type { EngineConfig } from './engine/types';
 import type { PhysicalPlan } from './query/types';
 
@@ -64,6 +76,10 @@ export type SimulationEventBody =
       parentId: PageId | null;
       /** 新页的初始内容（新建根页时用于携带第一个子指针）。 */
       init?: { keys?: Key[]; children?: PageId[] };
+      /** 堆页专用：文件内的块号（PostgreSQL 的 BlockNumber）。 */
+      blockNo?: number;
+      /** 堆页专用：该页的行指针容量。 */
+      slots?: number;
     }
   | { type: 'PAGE_FREE'; pageId: PageId }
   | { type: 'PARENT_SET'; pageId: PageId; parentId: PageId | null }
@@ -153,7 +169,145 @@ export type SimulationEventBody =
   | { type: 'PLAN_READY'; plan: PhysicalPlan }
   | { type: 'OPERATOR_OPEN'; nodeId: string; op: string; detail: string }
   | { type: 'OPERATOR_ROW'; nodeId: string; key: Key; emitted: boolean }
-  | { type: 'OPERATOR_CLOSE'; nodeId: string; actualRows: number };
+  | { type: 'OPERATOR_CLOSE'; nodeId: string; actualRows: number }
+
+  // ══ Phase 2：事务与 MVCC（PostgreSQL 堆表引擎）══════════════
+  | { type: 'TXN_BEGIN'; xid: Txid; isolation: IsolationLevel; implicit: boolean }
+  | { type: 'TXN_COMMIT'; xid: Txid; writes: number }
+  | { type: 'TXN_ABORT'; xid: Txid; writes: number; reason: string }
+  /**
+   * 取快照。READ COMMITTED 每条语句取一次，REPEATABLE READ 整个事务只取一次 ——
+   * 这条事件是「为什么两次相同的查询看到不同结果」的唯一物理证据。
+   */
+  | {
+      type: 'SNAPSHOT_TAKE';
+      xid: Txid;
+      /** 小于 xmin 的事务都已结束；≥ xmax 的都还没开始。 */
+      xmin: Txid;
+      xmax: Txid;
+      active: Txid[];
+      scope: 'statement' | 'transaction';
+    }
+
+  // —— 堆表（无序数据页 + 行指针 + 元组版本链）——————————————
+  | {
+      type: 'HEAP_INSERT';
+      pageId: PageId;
+      slot: number;
+      key: Key;
+      row: Row;
+      xmin: Txid;
+      /** 插入后该页还剩多少空槽（对应 PG 的 FSM）。 */
+      freeSlots: number;
+    }
+  /** 给旧版本打上 xmax；`nextTid` 就是 t_ctid，指向新版本，构成版本链。 */
+  | {
+      type: 'HEAP_SET_XMAX';
+      pageId: PageId;
+      slot: number;
+      xmax: Txid;
+      nextTid: Tid | null;
+      hot: boolean;
+      op: 'update' | 'delete';
+    }
+  | { type: 'LINE_POINTER'; pageId: PageId; slot: number; state: LinePointerState; redirectTo: number | null }
+  /** 索引项 → 堆元组的一跳。PostgreSQL 里**任何**索引扫描都要走这一步。 */
+  | {
+      type: 'HEAP_FETCH';
+      indexId: string;
+      fromPageId: PageId;
+      fromSlot: number;
+      tid: Tid;
+      found: boolean;
+      /** 沿 HOT 链走了多少步才找到可见版本。 */
+      chainSteps: number;
+    }
+  | {
+      type: 'VISIBILITY_CHECK';
+      pageId: PageId;
+      slot: number;
+      xmin: Txid;
+      xmax: Txid | null;
+      visible: boolean;
+      reason: string;
+    }
+  /** VACUUM 清理一个堆页：移除死元组、把 HOT 链头改成 redirect、回收行指针。 */
+  | {
+      type: 'HEAP_PRUNE';
+      pageId: PageId;
+      removed: number[];
+      redirected: number[];
+      deadLinePointers: number[];
+      freeSlots: number;
+    }
+  /**
+   * 可见性映射位（PostgreSQL 的 Visibility Map）。
+   * VACUUM 把「所有元组对所有事务都可见」的页标成 all-visible，
+   * Index Only Scan 才能跳过回堆；任何写入都会把它清掉。
+   */
+  | { type: 'VISIBILITY_MAP'; pageId: PageId; allVisible: boolean }
+  | { type: 'VACUUM_BEGIN'; mode: 'lazy' | 'full'; deadTuples: number }
+  | {
+      type: 'VACUUM_END';
+      mode: 'lazy' | 'full';
+      tuplesRemoved: number;
+      indexEntriesRemoved: number;
+      pagesTouched: number;
+      pagesFreed: number;
+    }
+  /** 表膨胀统计：活元组 / 死元组 / 堆页数，VACUUM 的效果一眼可见。 */
+  | { type: 'BLOAT_STAT'; liveTuples: number; deadTuples: number; heapPages: number }
+
+  // ══ Phase 3：LSM-Tree ═════════════════════════════════════
+  | { type: 'WAL_APPEND'; lsn: number; op: 'put' | 'delete'; key: Key; bytes: number }
+  | {
+      type: 'MEMTABLE_PUT';
+      key: Key;
+      row: Row | null;
+      tombstone: boolean;
+      entries: number;
+      limit: number;
+      /** 覆盖同一个键时为 true —— LSM 的「更新」就是再写一条新版本。 */
+      overwrite: boolean;
+    }
+  | { type: 'MEMTABLE_FREEZE'; tableId: string; entries: number }
+  | {
+      type: 'SST_CREATE';
+      sstId: string;
+      level: number;
+      entries: { key: Key; row: Row | null; tombstone: boolean }[];
+      minKey: Key;
+      maxKey: Key;
+      bytes: number;
+      source: 'flush' | 'compaction';
+    }
+  | { type: 'SST_DROP'; sstId: string; level: number; reason: 'compacted' | 'obsolete' }
+  | { type: 'COMPACTION_BEGIN'; level: number; targetLevel: number; inputs: string[]; reason: string }
+  | {
+      type: 'COMPACTION_END';
+      level: number;
+      targetLevel: number;
+      inputs: string[];
+      outputs: string[];
+      entriesIn: number;
+      entriesOut: number;
+      /** 被合并掉的重复版本与被回收的墓碑数量 —— 空间放大的直接来源。 */
+      dropped: number;
+    }
+  /** 布隆过滤器探测：`maybe=false` 直接跳过整个文件，这是 LSM 读放大的主要缓解手段。 */
+  | { type: 'BLOOM_PROBE'; sstId: string; level: number; key: Key; maybe: boolean; falsePositive: boolean }
+  | { type: 'SST_PROBE'; sstId: string; level: number; key: Key; found: boolean; tombstone: boolean }
+  | {
+      type: 'LSM_GET_RESULT';
+      key: Key;
+      found: boolean;
+      row: Row | null;
+      source: 'memtable' | 'immutable' | 'sst' | 'miss';
+      sstId: string | null;
+      /** 实际读过的 SST 数（读放大）与被布隆过滤器挡掉的数量。 */
+      probes: number;
+      bloomSkips: number;
+    };
 
 export type SimulationEvent = EventMeta & SimulationEventBody;
 export type SimulationEventType = SimulationEventBody['type'];
@@ -199,9 +353,45 @@ export const EVENT_CATEGORY: Record<SimulationEventType, EventCategory> = {
   OPERATOR_OPEN: 'plan',
   OPERATOR_ROW: 'plan',
   OPERATOR_CLOSE: 'plan',
+
+  TXN_BEGIN: 'txn',
+  TXN_COMMIT: 'txn',
+  TXN_ABORT: 'txn',
+  SNAPSHOT_TAKE: 'txn',
+  HEAP_INSERT: 'record',
+  HEAP_SET_XMAX: 'mvcc',
+  LINE_POINTER: 'structure',
+  HEAP_FETCH: 'access',
+  VISIBILITY_CHECK: 'mvcc',
+  HEAP_PRUNE: 'structure',
+  VISIBILITY_MAP: 'mvcc',
+  VACUUM_BEGIN: 'mvcc',
+  VACUUM_END: 'mvcc',
+  BLOAT_STAT: 'meta',
+
+  WAL_APPEND: 'lsm',
+  MEMTABLE_PUT: 'record',
+  MEMTABLE_FREEZE: 'lsm',
+  SST_CREATE: 'lsm',
+  SST_DROP: 'lsm',
+  COMPACTION_BEGIN: 'lsm',
+  COMPACTION_END: 'lsm',
+  BLOOM_PROBE: 'access',
+  SST_PROBE: 'access',
+  LSM_GET_RESULT: 'access',
 };
 
-export type EventCategory = 'command' | 'meta' | 'structure' | 'record' | 'buffer' | 'access' | 'plan';
+export type EventCategory =
+  | 'command'
+  | 'meta'
+  | 'structure'
+  | 'record'
+  | 'buffer'
+  | 'access'
+  | 'plan'
+  | 'txn'
+  | 'mvcc'
+  | 'lsm';
 
 /**
  * 每类事件占用的「逻辑时长」（毫秒）。
@@ -249,6 +439,32 @@ export const EVENT_DURATION: Record<SimulationEventType, number> = {
   OPERATOR_OPEN: 120,
   OPERATOR_ROW: 70,
   OPERATOR_CLOSE: 120,
+
+  TXN_BEGIN: 180,
+  TXN_COMMIT: 260,
+  TXN_ABORT: 320,
+  SNAPSHOT_TAKE: 220,
+  HEAP_INSERT: 200,
+  HEAP_SET_XMAX: 240,
+  LINE_POINTER: 120,
+  HEAP_FETCH: 260,
+  VISIBILITY_CHECK: 150,
+  HEAP_PRUNE: 420,
+  VISIBILITY_MAP: 90,
+  VACUUM_BEGIN: 260,
+  VACUUM_END: 320,
+  BLOAT_STAT: 60,
+
+  WAL_APPEND: 60,
+  MEMTABLE_PUT: 140,
+  MEMTABLE_FREEZE: 420,
+  SST_CREATE: 460,
+  SST_DROP: 300,
+  COMPACTION_BEGIN: 500,
+  COMPACTION_END: 620,
+  BLOOM_PROBE: 110,
+  SST_PROBE: 170,
+  LSM_GET_RESULT: 280,
 };
 
 /** 时间轴上值得停留的「关键帧」——单步/自动播放会在这些事件上放慢。 */
@@ -263,6 +479,14 @@ export const KEYFRAME_EVENTS: ReadonlySet<SimulationEventType> = new Set<Simulat
   'LOOKUP_BACK',
   'INDEX_CREATE',
   'COMMAND_END',
+  'TXN_COMMIT',
+  'TXN_ABORT',
+  'HEAP_PRUNE',
+  'VACUUM_END',
+  'MEMTABLE_FREEZE',
+  'SST_CREATE',
+  'COMPACTION_END',
+  'LSM_GET_RESULT',
 ]);
 
 /** 人类可读的一行事件描述，供事件日志与时间轴 tooltip 使用。 */
@@ -346,6 +570,64 @@ export function describeEvent(e: SimulationEvent): string {
       return `算子 ${e.nodeId} 产出 key=${e.key}${e.emitted ? '' : '（被过滤）'}`;
     case 'OPERATOR_CLOSE':
       return `算子 ${e.nodeId} 结束，实际 ${e.actualRows} 行`;
+
+    case 'TXN_BEGIN':
+      return `${e.implicit ? '隐式' : 'BEGIN'} 事务 xid=${e.xid}（${
+        e.isolation === 'repeatable-read' ? 'REPEATABLE READ' : 'READ COMMITTED'
+      }）`;
+    case 'TXN_COMMIT':
+      return `COMMIT xid=${e.xid}，写入 ${e.writes} 个版本`;
+    case 'TXN_ABORT':
+      return `ROLLBACK xid=${e.xid}：${e.reason}（${e.writes} 个版本作废）`;
+    case 'SNAPSHOT_TAKE':
+      return `取${e.scope === 'statement' ? '语句' : '事务'}快照 xid=${e.xid}：[${e.xmin}, ${e.xmax})，活跃 [${e.active.join(',') || '—'}]`;
+    case 'HEAP_INSERT':
+      return `堆页 #${e.pageId} slot ${e.slot} 写入新版本 key=${e.key}（xmin=${e.xmin}，剩余 ${e.freeSlots} 槽）`;
+    case 'HEAP_SET_XMAX':
+      return `${e.op === 'delete' ? '删除' : '更新'}：旧版本 (${e.pageId},${e.slot}) 打上 xmax=${e.xmax}${
+        e.nextTid ? ` → t_ctid ${formatTid(e.nextTid)}${e.hot ? '（HOT）' : ''}` : ''
+      }`;
+    case 'LINE_POINTER':
+      return `行指针 (${e.pageId},${e.slot}) → ${e.state}${e.redirectTo !== null ? ` → slot ${e.redirectTo}` : ''}`;
+    case 'HEAP_FETCH':
+      return `回堆取行：${e.indexId} → ${formatTid(e.tid)}${e.chainSteps > 0 ? `，沿链走 ${e.chainSteps} 步` : ''}${
+        e.found ? '' : '（无可见版本）'
+      }`;
+    case 'VISIBILITY_CHECK':
+      return `可见性 (${e.pageId},${e.slot}) xmin=${e.xmin} xmax=${e.xmax ?? '∅'} → ${e.visible ? '可见' : '不可见'}：${e.reason}`;
+    case 'HEAP_PRUNE':
+      return `清理堆页 #${e.pageId}：移除 ${e.removed.length} 个死元组、${e.redirected.length} 个重定向、${e.deadLinePointers.length} 个死指针`;
+    case 'VISIBILITY_MAP':
+      return `可见性映射：堆页 #${e.pageId} → ${e.allVisible ? 'all-visible（Index Only Scan 可跳过回堆）' : '已失效'}`;
+    case 'VACUUM_BEGIN':
+      return `VACUUM${e.mode === 'full' ? ' FULL' : ''} 开始，当前死元组 ${e.deadTuples}`;
+    case 'VACUUM_END':
+      return `VACUUM 结束：清理 ${e.tuplesRemoved} 个死元组 / ${e.indexEntriesRemoved} 条索引项，触达 ${e.pagesTouched} 页，回收 ${e.pagesFreed} 页`;
+    case 'BLOAT_STAT':
+      return `表统计：活 ${e.liveTuples} / 死 ${e.deadTuples}，堆页 ${e.heapPages}`;
+
+    case 'WAL_APPEND':
+      return `WAL 追加 lsn=${e.lsn}（${e.op} key=${e.key}，${e.bytes} B）`;
+    case 'MEMTABLE_PUT':
+      return `MemTable 写入 key=${e.key}${e.tombstone ? '（墓碑）' : ''}${e.overwrite ? '（覆盖旧版本）' : ''} — ${e.entries}/${e.limit}`;
+    case 'MEMTABLE_FREEZE':
+      return `MemTable 冻结为 ${e.tableId}（${e.entries} 条），等待刷成 SST`;
+    case 'SST_CREATE':
+      return `生成 SST ${e.sstId} @ L${e.level}：${e.entries.length} 条 [${e.minKey}, ${e.maxKey}]（${e.source === 'flush' ? '刷写' : '压实'}）`;
+    case 'SST_DROP':
+      return `丢弃 SST ${e.sstId} @ L${e.level}（${e.reason === 'compacted' ? '已被压实' : '过期'}）`;
+    case 'COMPACTION_BEGIN':
+      return `压实开始 L${e.level} → L${e.targetLevel}，输入 ${e.inputs.length} 个文件：${e.reason}`;
+    case 'COMPACTION_END':
+      return `压实结束 L${e.level} → L${e.targetLevel}：${e.entriesIn} 条 → ${e.entriesOut} 条，丢弃 ${e.dropped} 条旧版本/墓碑`;
+    case 'BLOOM_PROBE':
+      return `布隆过滤器 ${e.sstId}：key=${e.key} → ${e.maybe ? `可能存在${e.falsePositive ? '（假阳性）' : ''}` : '一定不存在，跳过'}`;
+    case 'SST_PROBE':
+      return `读 SST ${e.sstId} @ L${e.level}：key=${e.key} → ${e.found ? (e.tombstone ? '墓碑' : '命中') : '未命中'}`;
+    case 'LSM_GET_RESULT':
+      return `LSM 读取 key=${e.key} → ${
+        e.found ? `命中于 ${e.source === 'sst' ? e.sstId : e.source}` : '不存在'
+      }（读 ${e.probes} 个 SST，布隆跳过 ${e.bloomSkips} 个）`;
     default: {
       const never: never = e;
       return JSON.stringify(never);

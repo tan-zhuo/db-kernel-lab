@@ -11,6 +11,8 @@ import type { Command, EngineConfig } from '@dbkl/simulation-core';
 export interface SessionRecord {
   id: string;
   name: string;
+  /** 引擎 id。Phase 1 的旧会话没有这个字段，读出来是 undefined ⇒ 回落到默认引擎。 */
+  engineId?: string;
   config: EngineConfig;
   commands: Command[];
   markers: number[];

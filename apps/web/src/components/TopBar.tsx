@@ -1,5 +1,5 @@
 import { Camera, Download, Eye, Fullscreen, Loader2, RotateCcw, Type } from 'lucide-react';
-import { useSimStore } from '@/state/store';
+import { useCapability, useSimStore } from '@/state/store';
 import { captureScreenshot } from '@/components/scene/SceneRoot';
 
 export function TopBar() {
@@ -9,13 +9,14 @@ export function TopBar() {
   const engineName = useSimStore((s) => s.engineName);
   const showBufferPool = useSimStore((s) => s.showBufferPool);
   const showLabels = useSimStore((s) => s.showLabels);
+  const hasBufferPool = useCapability('buffer-pool');
   const store = useSimStore;
 
   return (
     <header className="flex items-center gap-3 border-b border-ink-700 bg-ink-900 px-3 py-2">
       <div className="flex items-baseline gap-2">
         <span className="text-[15px] font-semibold tracking-tight text-white">DB Kernel Lab</span>
-        <span className="text-[11px] text-mute-400">数据库内核可视化实验室 · Phase 1</span>
+        <span className="text-[11px] text-mute-400">数据库内核可视化实验室 · InnoDB / PostgreSQL / LSM</span>
       </div>
       <span className="rounded border border-ink-600 bg-ink-850 px-1.5 py-0.5 text-[10px] text-teal-500">
         {engineName || '引擎加载中…'}
@@ -26,13 +27,15 @@ export function TopBar() {
         <span className={error ? 'text-red-500' : 'text-mute-300'}>{error ?? status}</span>
       </div>
 
-      <button
-        className={`dbkl-btn ${showBufferPool ? 'text-accent-400' : ''}`}
-        onClick={() => store.getState().toggleBufferPool()}
-        title="显示/隐藏 Buffer Pool 视图 (B)"
-      >
-        <Eye size={13} /> 缓冲池
-      </button>
+      {hasBufferPool && (
+        <button
+          className={`dbkl-btn ${showBufferPool ? 'text-accent-400' : ''}`}
+          onClick={() => store.getState().toggleBufferPool()}
+          title="显示/隐藏 Buffer Pool 视图 (B)"
+        >
+          <Eye size={13} /> 缓冲池
+        </button>
+      )}
       <button
         className={`dbkl-btn ${showLabels ? 'text-accent-400' : ''}`}
         onClick={() => store.getState().toggleLabels()}

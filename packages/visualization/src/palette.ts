@@ -35,7 +35,45 @@ export const PALETTE = {
   edgeChild: '#2b3a55',
   edgeChildActive: '#e3b341',
   edgeSibling: '#1f3b34',
+
+  // —— PostgreSQL 堆表 / MVCC ——
+  /** 堆页外框（无序数据页，与 B+ 树页明显区分）。 */
+  heapPage: '#2d3f5e',
+  /** 活元组：当前快照能看见的版本。 */
+  tupleLive: '#2ea043',
+  /** 死元组：已被打上 xmax，等 VACUUM 回收 —— 表膨胀的来源。 */
+  tupleDead: '#8b3a34',
+  /** 行指针重定向（HOT 链被剪枝后留下的指针）。 */
+  tupleRedirect: '#d29922',
+  /** 空闲行指针，可被新版本复用。 */
+  tupleUnused: '#1a2233',
+  /** 可见性映射里被标成 all-visible 的页，Index Only Scan 可跳过它。 */
+  allVisible: '#00b8a3',
+  /** 版本链 t_ctid 连线。 */
+  versionChain: '#f778ba',
+  /** HOT 链：新版本不写索引，用不同颜色区分。 */
+  hotChain: '#39d353',
+  /** 索引项 → 堆元组的一跳。 */
+  heapFetch: '#58a6ff',
+
+  // —— LSM-Tree ——
+  memtable: '#00b8a3',
+  memtableFrozen: '#0f8f86',
+  /** 各层 SST 的底色，越往下越冷。 */
+  sstLevel: ['#2f81f7', '#7c5cff', '#a371f7', '#c77dff', '#6b7a91'],
+  /** 正在参与压实的文件。 */
+  compacting: '#db6d28',
+  /** 墓碑占比的提示色。 */
+  tombstone: '#f85149',
+  /** 布隆过滤器成功挡掉一个文件。 */
+  bloomSkip: '#39d353',
 } as const;
+
+/** 第 n 层 SST 的颜色（超出预设长度则复用最后一个）。 */
+export function levelColor(level: number): string {
+  const palette = PALETTE.sstLevel;
+  return palette[Math.min(level, palette.length - 1)];
+}
 
 export type PaletteKey = keyof typeof PALETTE;
 
@@ -53,6 +91,14 @@ export const HIGHLIGHT_COLOR = {
   alloc: PALETTE.split,
   scan: PALETTE.resident,
   lookup: PALETTE.lookup,
+  /** MVCC：写了一个新版本 / 给旧版本打 xmax。 */
+  version: PALETTE.versionChain,
+  /** VACUUM 清理。 */
+  vacuum: PALETTE.allVisible,
+  /** 索引 → 堆的一跳。 */
+  fetch: PALETTE.heapFetch,
+  /** LSM 压实。 */
+  compact: PALETTE.compacting,
 } as const;
 
 export type HighlightKind = keyof typeof HIGHLIGHT_COLOR;
@@ -71,4 +117,8 @@ export const HIGHLIGHT_DECAY_MS: Record<HighlightKind, number> = {
   alloc: 1600,
   scan: 700,
   lookup: 2200,
+  version: 1800,
+  vacuum: 2000,
+  fetch: 1800,
+  compact: 2400,
 };

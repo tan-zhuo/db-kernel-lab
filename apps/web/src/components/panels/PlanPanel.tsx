@@ -9,6 +9,10 @@ const OP_COLOR: Record<PlanNode['op'], string> = {
   IndexSeek: 'text-teal-500',
   IndexRangeScan: 'text-teal-500',
   RowIdLookup: 'text-violet-400',
+  SeqScan: 'text-orange-500',
+  IndexScan: 'text-teal-500',
+  IndexOnlyScan: 'text-green-500',
+  HeapFetch: 'text-violet-400',
 };
 
 /**
@@ -88,7 +92,7 @@ export function PlanPanel() {
             ))}
           </ul>
           <p className="mt-1 text-[10px] leading-relaxed text-mute-400/80">
-            代价单位是「等效页 IO」：顺序读 1，回表按随机读 ×1.4 并乘以聚簇索引树高。
+            代价单位是「等效页 IO」：顺序读 1，回表 / 回堆按随机读 ×1.4。
             估算行数来自统计信息，和实际行数不一致正是优化器选错计划的根源。
           </p>
         </div>

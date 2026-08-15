@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Play } from 'lucide-react';
 import { orderedIndexes, predicateToSql, type Predicate } from '@dbkl/simulation-core';
-import { useLabState, useSimStore } from '@/state/store';
+import { useCapability, useLabState, useSimStore } from '@/state/store';
 import { Field, Panel } from '@/components/ui/Panel';
 
 type Op = 'eq' | 'range' | 'all';
@@ -15,6 +15,8 @@ export function QueryPanel() {
   const state = useLabState();
   const run = useSimStore((s) => s.run);
   const busy = useSimStore((s) => s.busy);
+  // LSM 存储层没有优化器也没有二级索引：提示与投影两个旋钮对它没有意义。
+  const hasPlanChoice = useCapability('btree');
 
   const columns = state.schema?.columns ?? [];
   const numericColumns = columns.filter((c) => c.type !== 'varchar');
@@ -43,7 +45,7 @@ export function QueryPanel() {
   const sql = predicateToSql(predicate, state.schema?.name ?? 'users', projection);
 
   return (
-    <Panel title="查询" subtitle="优化器会在全表扫描与索引之间选择">
+    <Panel title="查询" subtitle={hasPlanChoice ? '优化器会在全表扫描与索引之间选择' : '归并扫描 + 过滤（LSM 没有优化器）'}>
       <div className="flex flex-col gap-2">
         <div className="grid grid-cols-[1fr_1fr] gap-2">
           <Field label="条件">
@@ -92,6 +94,7 @@ export function QueryPanel() {
           </div>
         )}
 
+        {hasPlanChoice ? (
         <div className="grid grid-cols-[1fr_1fr] gap-2">
           <Field label="索引提示">
             <select data-testid="q-hint" className="dbkl-input" value={hint} onChange={(e) => setHint(e.target.value)}>
@@ -116,6 +119,12 @@ export function QueryPanel() {
             </select>
           </Field>
         </div>
+        ) : (
+          <p className="rounded-md border border-ink-700 bg-ink-850/60 px-2 py-1.5 text-[10.5px] leading-relaxed text-mute-400">
+            LSM 存储层只有一条路可走：把 MemTable 与所有 SST 归并成有序视图后逐行过滤。
+            没有二级索引，也就没有「优化器选哪条路」这回事。
+          </p>
+        )}
 
         <code className="num block truncate rounded border border-ink-700 bg-ink-950 px-2 py-1.5 text-[11px] text-teal-500" title={sql}>
           {sql}

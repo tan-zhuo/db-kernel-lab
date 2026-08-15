@@ -3,11 +3,14 @@ import { useEffect, useRef } from 'react';
 import type { PageId, TableSchema } from '@dbkl/shared';
 import {
   DEFAULT_ENGINE_CONFIG,
+  DEFAULT_ENGINE_ID,
   DEFAULT_SCHEMA,
   HistoryManager,
   applyEvent,
   createInitialState,
+  getEngineFactory,
   type Command,
+  type EngineCapability,
   type EngineConfig,
   type LabState,
   type SimulationEvent,
@@ -40,6 +43,8 @@ export interface SimStore {
   loop: { from: number; to: number } | null;
   markers: number[];
   selectedPageId: PageId | null;
+  /** LSM 视图里被选中的 SST 文件（SST 不是页，另开一个选中态）。 */
+  selectedSstId: string | null;
   focusNonce: number;
   config: EngineConfig;
   commands: Command[];
@@ -47,13 +52,19 @@ export interface SimStore {
   status: string;
   error: string | null;
   booted: boolean;
+  /** 当前引擎 id（见 simulation-core 的引擎注册表）。 */
+  engineId: string;
   engineName: string;
+  /** 当前引擎声明的能力，UI 据此决定挂哪些面板与 3D 视图。 */
+  capabilities: readonly string[];
   showBufferPool: boolean;
   showLabels: boolean;
 
   boot(): Promise<void>;
   run(command: Command): Promise<void>;
   resetEngine(config?: EngineConfig, schema?: TableSchema): Promise<void>;
+  /** 换一个存储引擎：清空实验并按新引擎重新建表。 */
+  switchEngine(engineId: string, config?: Partial<EngineConfig>): Promise<void>;
   goTo(index: number): void;
   step(delta: number): void;
   jumpToCommand(direction: 1 | -1): void;
@@ -67,6 +78,7 @@ export interface SimStore {
   toggleMarker(index?: number): void;
   setLoop(loop: { from: number; to: number } | null): void;
   select(pageId: PageId | null): void;
+  selectSst(sstId: string | null): void;
   /** 请求相机聚焦：传页号则飞向该页，传 null 则适应整棵树。 */
   focusPage(pageId: PageId | null): void;
   setConfig(patch: Partial<EngineConfig>): void;
@@ -88,6 +100,7 @@ export const useSimStore = create<SimStore>()((set, get) => ({
   loop: null,
   markers: [],
   selectedPageId: null,
+  selectedSstId: null,
   focusNonce: 0,
   config: { ...DEFAULT_ENGINE_CONFIG },
   commands: [],
@@ -95,7 +108,9 @@ export const useSimStore = create<SimStore>()((set, get) => ({
   status: '初始化中…',
   error: null,
   booted: false,
+  engineId: DEFAULT_ENGINE_ID,
   engineName: '',
+  capabilities: [],
   showBufferPool: true,
   showLabels: true,
 
@@ -104,7 +119,9 @@ export const useSimStore = create<SimStore>()((set, get) => ({
     set({ booted: true, busy: true });
     setBootStep('正在读取本地实验会话…');
     const session = await loadSession(CURRENT_SESSION_ID);
-    const config = session?.config ?? { ...DEFAULT_ENGINE_CONFIG };
+    // 老会话里没有 engineId（Phase 1 只有一个引擎），按默认引擎恢复。
+    const engineId = session?.engineId ?? DEFAULT_ENGINE_ID;
+    const config = { ...DEFAULT_ENGINE_CONFIG, ...(session?.config ?? {}) };
     const commands: Command[] = session?.commands?.length
       ? session.commands
       : [{ kind: 'create_table', schema: DEFAULT_SCHEMA }];
@@ -112,6 +129,7 @@ export const useSimStore = create<SimStore>()((set, get) => ({
     const history = new HistoryManager(config);
     set({
       config,
+      engineId,
       history,
       commands,
       markers: session?.markers ?? [],
@@ -124,9 +142,9 @@ export const useSimStore = create<SimStore>()((set, get) => ({
       setBootStep(
         session?.commands?.length
           ? `正在重放上次实验的 ${commands.length} 条命令…`
-          : '正在初始化仿真引擎与聚簇索引…',
+          : '正在初始化仿真引擎与索引结构…',
       );
-      await client.init(config, commands, (events, progress) => {
+      await client.init(engineId, config, commands, (events, progress) => {
         history.push(events);
         if (progress) setBootStep(`重放命令 ${progress.done}/${progress.total}（${history.length} 个事件）`);
       });
@@ -139,6 +157,7 @@ export const useSimStore = create<SimStore>()((set, get) => ({
         version: get().version + 1,
         busy: false,
         engineName: client.engine?.name ?? '',
+        capabilities: client.engine?.capabilities ?? [],
         status: session?.commands?.length
           ? `已从 IndexedDB 恢复上次实验：${commands.length} 条命令 / ${history.length} 个事件`
           : '就绪：表 users 已创建，试试左侧的插入操作',
@@ -201,6 +220,7 @@ export const useSimStore = create<SimStore>()((set, get) => ({
   async resetEngine(config, schema) {
     const cfg = config ?? get().config;
     const tableSchema = schema ?? get().state.schema ?? DEFAULT_SCHEMA;
+    const engineId = get().engineId;
     const history = new HistoryManager(cfg);
     set({
       busy: true,
@@ -218,7 +238,7 @@ export const useSimStore = create<SimStore>()((set, get) => ({
     highlightTracker.clear();
     try {
       const bootstrap: Command = { kind: 'create_table', schema: tableSchema };
-      await client.reset(cfg, () => {});
+      await client.reset(engineId, cfg, () => {});
       await client.run(bootstrap, (events) => history.push(events));
       set({
         commands: [bootstrap],
@@ -227,12 +247,26 @@ export const useSimStore = create<SimStore>()((set, get) => ({
         playhead: history.duration,
         busy: false,
         version: get().version + 1,
-        status: `已重置：表 ${tableSchema.name}，order=${cfg.order}，buffer=${cfg.bufferPoolFrames} 帧，fillFactor=${cfg.fillFactor}`,
+        engineName: client.engine?.name ?? get().engineName,
+        capabilities: client.engine?.capabilities ?? get().capabilities,
+        status: `已重置：表 ${tableSchema.name} · 引擎 ${getEngineFactory(engineId)?.label ?? engineId}`,
       });
       saveSession(snapshotSession(get()));
     } catch (err) {
       set({ busy: false, error: err instanceof Error ? err.message : String(err) });
     }
+  },
+
+  async switchEngine(engineId, configPatch) {
+    if (get().busy) return;
+    const factory = getEngineFactory(engineId);
+    if (!factory) {
+      set({ error: `未知引擎 ${engineId}` });
+      return;
+    }
+    // 换引擎 = 换一套物理模型，历史命令在新引擎下未必成立，因此从头开始。
+    set({ engineId, config: { ...get().config, ...configPatch }, selectedPageId: null });
+    await get().resetEngine({ ...get().config, ...configPatch });
   },
 
   goTo(index) {
@@ -341,7 +375,11 @@ export const useSimStore = create<SimStore>()((set, get) => ({
   },
 
   select(pageId) {
-    set({ selectedPageId: pageId });
+    set({ selectedPageId: pageId, selectedSstId: null });
+  },
+
+  selectSst(sstId) {
+    set({ selectedSstId: sstId, selectedPageId: null });
   },
 
   focusPage(pageId) {
@@ -365,7 +403,8 @@ export const useSimStore = create<SimStore>()((set, get) => ({
       `dbkl-events-${Date.now()}.json`,
       JSON.stringify(
         {
-          version: 1,
+          version: 2,
+          engineId: get().engineId,
           engine: get().engineName,
           config: get().config,
           commands: get().commands,
@@ -400,6 +439,7 @@ function snapshotSession(s: SimStore): SessionRecord {
   return {
     id: CURRENT_SESSION_ID,
     name: '当前实验',
+    engineId: s.engineId,
     config: s.config,
     commands: s.commands,
     markers: s.markers,
@@ -433,6 +473,16 @@ export function useLabState(): LabState {
 /** 只订阅 version，用于需要「每次状态推进都重画」的组件。 */
 export function useVersion(): number {
   return useSimStore((s) => s.version);
+}
+
+/**
+ * 当前引擎是否具备某项能力。
+ *
+ * 这是 UI 唯一被允许「按引擎分支」的地方：面板与 3D 视图都只问能力，
+ * 不问「你是不是 PostgreSQL」，这样第三方引擎插件也能复用全部视图。
+ */
+export function useCapability(capability: EngineCapability): boolean {
+  return useSimStore((s) => s.capabilities.includes(capability));
 }
 
 /** rAF 播放驱动：挂在应用根组件上。 */

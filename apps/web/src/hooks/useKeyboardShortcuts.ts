@@ -55,6 +55,7 @@ export function useKeyboardShortcuts(): void {
           s.toggleLabels();
           return;
         case 'Escape':
+          // select 会同时清掉 SST 的选中态（两者互斥）。
           s.select(null);
           return;
         default:

@@ -2,11 +2,15 @@ import {
   INTERNAL_ENTRY_BYTES,
   PAGE_HEADER_BYTES,
   estimateRecordBytes,
+  type IsolationLevel,
   type Key,
+  type LinePointerState,
   type PageId,
   type PageType,
   type Row,
   type TableSchema,
+  type Tid,
+  type Txid,
 } from '@dbkl/shared';
 import type { SimulationEvent } from './events';
 import { DEFAULT_ENGINE_CONFIG, PRIMARY_INDEX_ID, type EngineConfig } from './engine/types';
@@ -44,6 +48,42 @@ export interface PageState {
   lsn: number;
   createdAtSeq: number;
   lastTouchedSeq: number;
+  /** 堆页专用内容（PostgreSQL 引擎），B+ 树页为 undefined。 */
+  heap?: HeapPageState;
+}
+
+/**
+ * 堆表里的一个元组版本。
+ *
+ * `xmin` / `xmax` 就是 PostgreSQL 的元组头：谁插入的、谁删除的。
+ * `next` 是 t_ctid，指向该行的**下一个版本**，一串版本就是版本链。
+ */
+export interface HeapTupleState {
+  slot: number;
+  key: Key;
+  row: Row | null;
+  xmin: Txid;
+  xmax: Txid | null;
+  /** t_ctid：指向新版本；为 null 表示这是链尾（最新版本）。 */
+  next: Tid | null;
+  /** 是否由 HOT 更新产生（HOT 版本没有自己的索引项）。 */
+  hot: boolean;
+  /** 行指针状态。 */
+  lp: LinePointerState;
+  /** `lp === 'redirect'` 时指向的槽位。 */
+  redirectTo: number | null;
+}
+
+/** 堆页：一个行指针数组 + 若干元组版本，没有任何顺序保证。 */
+export interface HeapPageState {
+  blockNo: number;
+  /** 下标即行指针编号（PostgreSQL 的 OffsetNumber - 1）。 */
+  tuples: HeapTupleState[];
+  /** 还能放几个新版本（对应 FSM 里的空闲空间）。 */
+  freeSlots: number;
+  slots: number;
+  /** 可见性映射位：该页所有元组对所有事务都可见，Index Only Scan 可跳过回堆。 */
+  allVisible: boolean;
 }
 
 /** 优化器看到的统计信息快照（可能是过期的）。 */
@@ -100,6 +140,29 @@ export interface Metrics {
   scanRows: number;
   /** 回表次数：二级索引查询的主要成本来源。 */
   lookups: number;
+
+  // —— Phase 2：堆表 / MVCC ——
+  /** 索引项 → 堆元组的取行次数（PostgreSQL 里任何索引扫描都要付这笔钱）。 */
+  heapFetches: number;
+  /** 写入的元组版本总数（UPDATE 会写新版本，因此 > 行数）。 */
+  versionsWritten: number;
+  hotUpdates: number;
+  coldUpdates: number;
+  /** 可见性判定次数。 */
+  visibilityChecks: number;
+  vacuumedTuples: number;
+
+  // —— Phase 3：LSM ——
+  memtableWrites: number;
+  memtableFlushes: number;
+  compactions: number;
+  /** 实际读过的 SST 数（读放大）。 */
+  sstReads: number;
+  /** 被布隆过滤器挡掉、免于读取的 SST 数。 */
+  bloomSkips: number;
+  /** 落盘的条目总数（含压实重写），与 memtableWrites 之比即写放大。 */
+  entriesWritten: number;
+  walBytes: number;
 }
 
 export interface ActiveCommand {
@@ -126,6 +189,124 @@ export interface LookupLink {
   indexKey: Key;
   primaryKey: Key;
   done: boolean;
+}
+
+// ——— Phase 2：事务 / MVCC ————————————————————————————————
+
+export interface SnapshotState {
+  xmin: Txid;
+  xmax: Txid;
+  active: Txid[];
+  scope: 'statement' | 'transaction';
+}
+
+export interface TxnState {
+  xid: Txid;
+  isolation: IsolationLevel;
+  implicit: boolean;
+  writes: number;
+  status: 'running' | 'committed' | 'aborted';
+}
+
+export interface VisibilityProbe {
+  pageId: PageId;
+  slot: number;
+  xmin: Txid;
+  xmax: Txid | null;
+  visible: boolean;
+  reason: string;
+}
+
+/** 索引项 → 堆元组的一跳，3D 里画成一条跨结构的连线。 */
+export interface HeapFetchLink {
+  indexId: string;
+  fromPageId: PageId;
+  fromSlot: number;
+  tid: Tid;
+  found: boolean;
+  chainSteps: number;
+}
+
+export interface MvccState {
+  /** 当前正在执行的事务（隐式事务也会出现在这里）。 */
+  current: TxnState | null;
+  /** 最近若干个事务的结局，供事务面板展示。 */
+  recent: TxnState[];
+  snapshot: SnapshotState | null;
+  /** 最近一次查询的可见性判定轨迹（上限 40 条）。 */
+  probes: VisibilityProbe[];
+  liveTuples: number;
+  deadTuples: number;
+  heapPages: number;
+  hotUpdates: number;
+  coldUpdates: number;
+  vacuums: number;
+  lastVacuum: {
+    mode: 'lazy' | 'full';
+    tuplesRemoved: number;
+    indexEntriesRemoved: number;
+    pagesFreed: number;
+  } | null;
+  fetch: HeapFetchLink | null;
+  /** 最近一次沿 t_ctid 走过的版本链。 */
+  chain: Tid[];
+}
+
+// ——— Phase 3：LSM-Tree ————————————————————————————————
+
+export interface SstEntryState {
+  key: Key;
+  row: Row | null;
+  tombstone: boolean;
+}
+
+export interface SstState {
+  id: string;
+  level: number;
+  entries: SstEntryState[];
+  minKey: Key;
+  maxKey: Key;
+  bytes: number;
+  source: 'flush' | 'compaction';
+  createdAtSeq: number;
+  /** 正在被压实（3D 里闪烁提示）。 */
+  compacting: boolean;
+}
+
+export interface LsmProbe {
+  sstId: string;
+  level: number;
+  kind: 'bloom-skip' | 'bloom-maybe' | 'read';
+  found: boolean;
+  falsePositive: boolean;
+}
+
+export interface LsmState {
+  memtable: { entries: SstEntryState[]; limit: number };
+  /** 已冻结、等待刷盘的 MemTable。 */
+  immutable: { id: string; entries: number }[];
+  ssts: Record<string, SstState>;
+  /** levels[i] = 第 i 层的 SST id，按键区间升序（L0 例外：按新旧排列）。 */
+  levels: string[][];
+  wal: { records: number; bytes: number; lsn: number };
+  /** 最近一次读取的探测轨迹。 */
+  probes: LsmProbe[];
+  lastGet: {
+    key: Key;
+    found: boolean;
+    row: Row | null;
+    source: 'memtable' | 'immutable' | 'sst' | 'miss';
+    sstId: string | null;
+    probes: number;
+    bloomSkips: number;
+  } | null;
+  activeCompaction: { level: number; targetLevel: number; inputs: string[] } | null;
+  flushes: number;
+  compactions: number;
+  droppedEntries: number;
+  /** 写放大：用户写入的条目数 vs 实际落盘的条目数。 */
+  userWrites: number;
+  entriesWritten: number;
 }
 
 export interface OperatorStat {
@@ -165,6 +346,10 @@ export interface LabState {
   operators: Record<string, OperatorStat>;
   /** 最近一次回表连线，用于 3D 中画出跨树跳转。 */
   lookup: LookupLink | null;
+  /** PostgreSQL 引擎的事务 / MVCC 状态；其它引擎为 null。 */
+  mvcc: MvccState | null;
+  /** LSM 引擎的 MemTable / SST 层级状态；其它引擎为 null。 */
+  lsm: LsmState | null;
   /** 最近一次结构性事件的序号，供可视化触发一次性动画。 */
   lastStructuralSeq: number;
   appliedSeq: number;
@@ -194,8 +379,46 @@ export function createInitialState(config: EngineConfig = DEFAULT_ENGINE_CONFIG)
     plan: null,
     operators: {},
     lookup: null,
+    mvcc: null,
+    lsm: null,
     lastStructuralSeq: -1,
     appliedSeq: -1,
+  };
+}
+
+export function createMvccState(): MvccState {
+  return {
+    current: null,
+    recent: [],
+    snapshot: null,
+    probes: [],
+    liveTuples: 0,
+    deadTuples: 0,
+    heapPages: 0,
+    hotUpdates: 0,
+    coldUpdates: 0,
+    vacuums: 0,
+    lastVacuum: null,
+    fetch: null,
+    chain: [],
+  };
+}
+
+export function createLsmState(limit: number): LsmState {
+  return {
+    memtable: { entries: [], limit },
+    immutable: [],
+    ssts: {},
+    levels: [],
+    wal: { records: 0, bytes: 0, lsn: 0 },
+    probes: [],
+    lastGet: null,
+    activeCompaction: null,
+    flushes: 0,
+    compactions: 0,
+    droppedEntries: 0,
+    userWrites: 0,
+    entriesWritten: 0,
   };
 }
 
@@ -219,6 +442,19 @@ export function createMetrics(): Metrics {
     separatorWrites: 0,
     scanRows: 0,
     lookups: 0,
+    heapFetches: 0,
+    versionsWritten: 0,
+    hotUpdates: 0,
+    coldUpdates: 0,
+    visibilityChecks: 0,
+    vacuumedTuples: 0,
+    memtableWrites: 0,
+    memtableFlushes: 0,
+    compactions: 0,
+    sstReads: 0,
+    bloomSkips: 0,
+    entriesWritten: 0,
+    walBytes: 0,
   };
 }
 
@@ -227,6 +463,36 @@ export function cloneState(state: LabState): LabState {
 }
 
 const MAX_SCAN_OUTPUT = 200;
+const MAX_TXN_HISTORY = 12;
+const MAX_VISIBILITY_PROBES = 40;
+const MAX_LSM_PROBES = 40;
+
+/** MVCC 子状态是懒创建的：只有产生过事务/堆表事件的引擎才有它。 */
+function mvcc(state: LabState): MvccState {
+  if (!state.mvcc) state.mvcc = createMvccState();
+  return state.mvcc;
+}
+
+function lsm(state: LabState): LsmState {
+  if (!state.lsm) state.lsm = createLsmState(state.config.memtableLimit);
+  return state.lsm;
+}
+
+function heapOf(p: PageState): HeapPageState {
+  if (!p.heap) p.heap = { blockNo: 0, tuples: [], freeSlots: 0, slots: 0, allVisible: false };
+  return p.heap;
+}
+
+function pushCapped<T>(arr: T[], item: T, max: number): void {
+  arr.push(item);
+  if (arr.length > max) arr.splice(0, arr.length - max);
+}
+
+function insertSorted(entries: SstEntryState[], entry: SstEntryState): void {
+  const at = entries.findIndex((x) => x.key > entry.key);
+  if (at < 0) entries.push(entry);
+  else entries.splice(at, 0, entry);
+}
 
 function page(state: LabState, id: PageId): PageState {
   const p = state.pages[id];
@@ -266,6 +532,14 @@ export function applyEvent(state: LabState, e: SimulationEvent): LabState {
       state.scanOutput = [];
       state.lastResult = null;
       state.lookup = null;
+      if (state.mvcc) {
+        state.mvcc.probes = [];
+        state.mvcc.fetch = null;
+        state.mvcc.chain = [];
+      }
+      if (state.lsm) {
+        state.lsm.probes = [];
+      }
       if (e.kind === 'query') {
         state.plan = null;
         state.operators = {};
@@ -287,6 +561,7 @@ export function applyEvent(state: LabState, e: SimulationEvent): LabState {
         state.buffer.refBits = {};
         state.buffer.clockHand = 0;
       }
+      if (state.lsm) state.lsm.memtable.limit = e.config.memtableLimit;
       break;
     }
     case 'TABLE_CREATE': {
@@ -338,7 +613,18 @@ export function applyEvent(state: LabState, e: SimulationEvent): LabState {
         lsn: e.seq,
         createdAtSeq: e.seq,
         lastTouchedSeq: e.seq,
+        heap:
+          e.pageType === 'heap'
+            ? {
+                blockNo: e.blockNo ?? 0,
+                tuples: [],
+                freeSlots: e.slots ?? 0,
+                slots: e.slots ?? 0,
+                allVisible: false,
+              }
+            : undefined,
       };
+      if (e.pageType === 'heap' && state.mvcc) state.mvcc.heapPages++;
       m.pageAllocs++;
       state.lastStructuralSeq = e.seq;
       break;
@@ -348,6 +634,7 @@ export function applyEvent(state: LabState, e: SimulationEvent): LabState {
       if (p) {
         const ix = state.indexes[p.indexId];
         if (ix && ix.firstLeafId === e.pageId) ix.firstLeafId = p.next;
+        if (p.type === 'heap' && state.mvcc) state.mvcc.heapPages--;
         delete state.pages[e.pageId];
       }
       releaseFrame(state, e.pageId);
@@ -687,6 +974,344 @@ export function applyEvent(state: LabState, e: SimulationEvent): LabState {
       break;
     }
 
+    // ══ Phase 2：事务 / MVCC ═══════════════════════════════
+    case 'TXN_BEGIN': {
+      const mv = mvcc(state);
+      mv.current = { xid: e.xid, isolation: e.isolation, implicit: e.implicit, writes: 0, status: 'running' };
+      break;
+    }
+    case 'TXN_COMMIT': {
+      const mv = mvcc(state);
+      const txn: TxnState = {
+        xid: e.xid,
+        isolation: mv.current?.isolation ?? 'read-committed',
+        implicit: mv.current?.implicit ?? true,
+        writes: e.writes,
+        status: 'committed',
+      };
+      pushCapped(mv.recent, txn, MAX_TXN_HISTORY);
+      mv.current = null;
+      mv.snapshot = null;
+      break;
+    }
+    case 'TXN_ABORT': {
+      const mv = mvcc(state);
+      const txn: TxnState = {
+        xid: e.xid,
+        isolation: mv.current?.isolation ?? 'read-committed',
+        implicit: mv.current?.implicit ?? true,
+        writes: e.writes,
+        status: 'aborted',
+      };
+      pushCapped(mv.recent, txn, MAX_TXN_HISTORY);
+      mv.current = null;
+      mv.snapshot = null;
+      break;
+    }
+    case 'SNAPSHOT_TAKE': {
+      mvcc(state).snapshot = { xmin: e.xmin, xmax: e.xmax, active: e.active.slice(), scope: e.scope };
+      break;
+    }
+
+    case 'HEAP_INSERT': {
+      const p = touch(state, e.pageId, e.seq);
+      const heap = heapOf(p);
+      heap.tuples[e.slot] = {
+        slot: e.slot,
+        key: e.key,
+        row: e.row,
+        xmin: e.xmin,
+        xmax: null,
+        next: null,
+        hot: false,
+        lp: 'normal',
+        redirectTo: null,
+      };
+      heap.freeSlots = e.freeSlots;
+      p.lsn = e.seq;
+      state.focusPageId = e.pageId;
+      state.focusSlot = e.slot;
+      state.focusKey = e.key;
+      const mv = mvcc(state);
+      mv.liveTuples++;
+      if (mv.current) mv.current.writes++;
+      m.versionsWritten++;
+      m.recordsInserted++;
+      break;
+    }
+    case 'HEAP_SET_XMAX': {
+      const p = touch(state, e.pageId, e.seq);
+      const tuple = heapOf(p).tuples[e.slot];
+      if (tuple) {
+        tuple.xmax = e.xmax;
+        tuple.next = e.nextTid ? { ...e.nextTid } : null;
+        // 新版本继承 HOT 标记：链上除链头以外的版本都没有独立索引项。
+        if (e.nextTid) {
+          const target = state.pages[e.nextTid.pageId]?.heap?.tuples[e.nextTid.slot];
+          if (target) target.hot = e.hot;
+        }
+      }
+      p.lsn = e.seq;
+      const mv = mvcc(state);
+      mv.liveTuples = Math.max(0, mv.liveTuples - 1);
+      mv.deadTuples++;
+      if (e.op === 'update') {
+        if (e.hot) mv.hotUpdates++;
+        else mv.coldUpdates++;
+        if (e.hot) m.hotUpdates++;
+        else m.coldUpdates++;
+        m.recordsUpdated++;
+      } else {
+        m.recordsDeleted++;
+      }
+      state.focusPageId = e.pageId;
+      state.focusSlot = e.slot;
+      break;
+    }
+    case 'LINE_POINTER': {
+      const p = touch(state, e.pageId, e.seq);
+      const heap = heapOf(p);
+      const tuple = heap.tuples[e.slot];
+      if (tuple) {
+        tuple.lp = e.state;
+        tuple.redirectTo = e.redirectTo;
+        // 只有 normal 行指针才指向真正的元组内容。
+        if (e.state !== 'normal') {
+          tuple.row = null;
+          tuple.next = null;
+        }
+      } else if (e.state !== 'unused') {
+        heap.tuples[e.slot] = {
+          slot: e.slot,
+          key: Number.NaN,
+          row: null,
+          xmin: 0,
+          xmax: null,
+          next: null,
+          hot: false,
+          lp: e.state,
+          redirectTo: e.redirectTo,
+        };
+      }
+      p.lsn = e.seq;
+      break;
+    }
+    case 'HEAP_FETCH': {
+      const mv = mvcc(state);
+      mv.fetch = {
+        indexId: e.indexId,
+        fromPageId: e.fromPageId,
+        fromSlot: e.fromSlot,
+        tid: { ...e.tid },
+        found: e.found,
+        chainSteps: e.chainSteps,
+      };
+      m.heapFetches++;
+      break;
+    }
+    case 'VISIBILITY_CHECK': {
+      const mv = mvcc(state);
+      pushCapped(
+        mv.probes,
+        { pageId: e.pageId, slot: e.slot, xmin: e.xmin, xmax: e.xmax, visible: e.visible, reason: e.reason },
+        MAX_VISIBILITY_PROBES,
+      );
+      m.visibilityChecks++;
+      break;
+    }
+    case 'HEAP_PRUNE': {
+      const p = touch(state, e.pageId, e.seq);
+      const heap = heapOf(p);
+      for (const slot of e.removed) {
+        const t = heap.tuples[slot];
+        if (t) {
+          heap.tuples[slot] = {
+            slot,
+            key: Number.NaN,
+            row: null,
+            xmin: 0,
+            xmax: null,
+            next: null,
+            hot: false,
+            lp: 'unused',
+            redirectTo: null,
+          };
+        }
+      }
+      for (const slot of e.deadLinePointers) {
+        const t = heap.tuples[slot];
+        if (t) {
+          t.lp = 'dead';
+          t.row = null;
+        }
+      }
+      heap.freeSlots = e.freeSlots;
+      p.lsn = e.seq;
+      const mv = mvcc(state);
+      mv.deadTuples = Math.max(0, mv.deadTuples - e.removed.length);
+      m.vacuumedTuples += e.removed.length;
+      state.lastStructuralSeq = e.seq;
+      break;
+    }
+    case 'VISIBILITY_MAP': {
+      const p = state.pages[e.pageId];
+      if (p?.heap) p.heap.allVisible = e.allVisible;
+      break;
+    }
+    case 'VACUUM_BEGIN':
+      break;
+    case 'VACUUM_END': {
+      const mv = mvcc(state);
+      mv.vacuums++;
+      mv.lastVacuum = {
+        mode: e.mode,
+        tuplesRemoved: e.tuplesRemoved,
+        indexEntriesRemoved: e.indexEntriesRemoved,
+        pagesFreed: e.pagesFreed,
+      };
+      state.lastStructuralSeq = e.seq;
+      break;
+    }
+    case 'BLOAT_STAT': {
+      const mv = mvcc(state);
+      mv.liveTuples = e.liveTuples;
+      mv.deadTuples = e.deadTuples;
+      mv.heapPages = e.heapPages;
+      // 堆表引擎没有聚簇索引，行数只能由这条权威统计给出。
+      state.recordCount = e.liveTuples;
+      break;
+    }
+
+    // ══ Phase 3：LSM-Tree ══════════════════════════════════
+    case 'WAL_APPEND': {
+      const l = lsm(state);
+      l.wal.records++;
+      l.wal.bytes += e.bytes;
+      l.wal.lsn = e.lsn;
+      m.walBytes += e.bytes;
+      break;
+    }
+    case 'MEMTABLE_PUT': {
+      const l = lsm(state);
+      l.memtable.limit = e.limit;
+      const idx = l.memtable.entries.findIndex((x) => x.key === e.key);
+      const entry: SstEntryState = { key: e.key, row: e.row, tombstone: e.tombstone };
+      if (idx >= 0) l.memtable.entries[idx] = entry;
+      else insertSorted(l.memtable.entries, entry);
+      l.userWrites++;
+      state.focusKey = e.key;
+      m.memtableWrites++;
+      break;
+    }
+    case 'MEMTABLE_FREEZE': {
+      const l = lsm(state);
+      l.immutable.push({ id: e.tableId, entries: e.entries });
+      l.memtable.entries = [];
+      state.lastStructuralSeq = e.seq;
+      break;
+    }
+    case 'SST_CREATE': {
+      const l = lsm(state);
+      l.ssts[e.sstId] = {
+        id: e.sstId,
+        level: e.level,
+        entries: e.entries.map((x) => ({ key: x.key, row: x.row, tombstone: x.tombstone })),
+        minKey: e.minKey,
+        maxKey: e.maxKey,
+        bytes: e.bytes,
+        source: e.source,
+        createdAtSeq: e.seq,
+        compacting: false,
+      };
+      while (l.levels.length <= e.level) l.levels.push([]);
+      // L0 的文件区间可以重叠，按「新的在前」排；其它层按键区间排。
+      if (e.level === 0) l.levels[0].unshift(e.sstId);
+      else {
+        const level = l.levels[e.level];
+        const at = level.findIndex((id) => (l.ssts[id]?.minKey ?? Infinity) > e.minKey);
+        if (at < 0) level.push(e.sstId);
+        else level.splice(at, 0, e.sstId);
+      }
+      if (e.source === 'flush') {
+        l.flushes++;
+        l.immutable.shift();
+        m.memtableFlushes++;
+      }
+      l.entriesWritten += e.entries.length;
+      m.entriesWritten += e.entries.length;
+      state.lastStructuralSeq = e.seq;
+      break;
+    }
+    case 'SST_DROP': {
+      const l = lsm(state);
+      delete l.ssts[e.sstId];
+      const level = l.levels[e.level];
+      if (level) {
+        const at = level.indexOf(e.sstId);
+        if (at >= 0) level.splice(at, 1);
+      }
+      state.lastStructuralSeq = e.seq;
+      break;
+    }
+    case 'COMPACTION_BEGIN': {
+      const l = lsm(state);
+      l.activeCompaction = { level: e.level, targetLevel: e.targetLevel, inputs: e.inputs.slice() };
+      for (const id of e.inputs) {
+        const sst = l.ssts[id];
+        if (sst) sst.compacting = true;
+      }
+      break;
+    }
+    case 'COMPACTION_END': {
+      const l = lsm(state);
+      l.activeCompaction = null;
+      l.compactions++;
+      l.droppedEntries += e.dropped;
+      m.compactions++;
+      state.lastStructuralSeq = e.seq;
+      break;
+    }
+    case 'BLOOM_PROBE': {
+      const l = lsm(state);
+      pushCapped(
+        l.probes,
+        {
+          sstId: e.sstId,
+          level: e.level,
+          kind: e.maybe ? 'bloom-maybe' : 'bloom-skip',
+          found: false,
+          falsePositive: e.falsePositive,
+        },
+        MAX_LSM_PROBES,
+      );
+      if (!e.maybe) m.bloomSkips++;
+      break;
+    }
+    case 'SST_PROBE': {
+      const l = lsm(state);
+      pushCapped(
+        l.probes,
+        { sstId: e.sstId, level: e.level, kind: 'read', found: e.found, falsePositive: false },
+        MAX_LSM_PROBES,
+      );
+      m.sstReads++;
+      break;
+    }
+    case 'LSM_GET_RESULT': {
+      const l = lsm(state);
+      l.lastGet = {
+        key: e.key,
+        found: e.found,
+        row: e.row,
+        source: e.source,
+        sstId: e.sstId,
+        probes: e.probes,
+        bloomSkips: e.bloomSkips,
+      };
+      state.lastResult = { key: e.key, found: e.found, pageId: null, slot: -1 };
+      break;
+    }
+
     default: {
       const never: never = e;
       throw new Error(`[dbkl] reducer: unhandled event ${JSON.stringify(never)}`);
@@ -725,6 +1350,15 @@ export interface StructuralPage {
   next: PageId | null;
   dirty: boolean;
   resident: boolean;
+  /** 堆页内容（PostgreSQL 引擎）。 */
+  heap?: HeapPageState;
+}
+
+/** LSM 的结构投影：只比较「文件里有哪些键、是不是墓碑」，不比较行内容。 */
+export interface StructuralLsm {
+  memtable: { key: Key; tombstone: boolean }[];
+  immutable: { id: string; entries: number }[];
+  levels: { id: string; level: number; minKey: Key; maxKey: Key; keys: Key[]; tombstones: Key[] }[][];
 }
 
 export interface StructuralIndex {
@@ -751,6 +1385,29 @@ export interface StructuralSnapshot {
   pages: Record<PageId, StructuralPage>;
   bufferFrames: (PageId | null)[];
   bufferRecency: PageId[];
+  /** LSM 引擎专用；其它引擎不设置该字段。 */
+  lsm?: StructuralLsm;
+}
+
+/** 把 LabState 里的 LSM 子状态投影成可与引擎快照比较的形状。 */
+export function projectLsm(lsmState: LsmState): StructuralLsm {
+  return {
+    memtable: lsmState.memtable.entries.map((e) => ({ key: e.key, tombstone: e.tombstone })),
+    immutable: lsmState.immutable.map((t) => ({ id: t.id, entries: t.entries })),
+    levels: lsmState.levels.map((ids) =>
+      ids
+        .map((id) => lsmState.ssts[id])
+        .filter((s): s is SstState => !!s)
+        .map((s) => ({
+          id: s.id,
+          level: s.level,
+          minKey: s.minKey,
+          maxKey: s.maxKey,
+          keys: s.entries.map((e) => e.key),
+          tombstones: s.entries.filter((e) => e.tombstone).map((e) => e.key),
+        })),
+    ),
+  };
 }
 
 export function projectStructure(state: LabState): StructuralSnapshot {
@@ -770,6 +1427,7 @@ export function projectStructure(state: LabState): StructuralSnapshot {
       next: p.next,
       dirty: p.dirty,
       resident: p.resident,
+      heap: p.heap ? structuredClone(p.heap) : undefined,
     };
   }
   const indexes: Record<string, StructuralIndex> = {};
@@ -793,6 +1451,7 @@ export function projectStructure(state: LabState): StructuralSnapshot {
     pages,
     bufferFrames: state.buffer.frames.slice(),
     bufferRecency: state.buffer.recency.slice(),
+    lsm: state.lsm ? projectLsm(state.lsm) : undefined,
   };
 }
 
@@ -857,4 +1516,109 @@ export function pageCountByIndex(state: LabState, indexId: string): number {
   let n = 0;
   for (const id in state.pages) if (state.pages[id].indexId === indexId) n++;
   return n;
+}
+
+// ——— 堆表 / MVCC 派生量 ————————————————————————————————
+
+/** 堆文件里的所有页，按块号升序（这就是「顺序扫描」看到的顺序）。 */
+export function heapPages(state: LabState): PageState[] {
+  return Object.values(state.pages)
+    .filter((p) => p.type === 'heap')
+    .sort((a, b) => (a.heap?.blockNo ?? 0) - (b.heap?.blockNo ?? 0));
+}
+
+/** 表膨胀率：死元组 / (活 + 死)。VACUUM 就是为了把它压下去。 */
+export function bloatRatio(state: LabState): number {
+  const mv = state.mvcc;
+  if (!mv) return Number.NaN;
+  const total = mv.liveTuples + mv.deadTuples;
+  return total === 0 ? 0 : mv.deadTuples / total;
+}
+
+/** 沿 t_ctid 展开一条版本链（从给定 TID 开始）。 */
+export function versionChain(state: LabState, start: Tid): HeapTupleState[] {
+  const out: HeapTupleState[] = [];
+  const seen = new Set<string>();
+  let cur: Tid | null = start;
+  while (cur !== null) {
+    const key = `${cur.pageId}:${cur.slot}`;
+    if (seen.has(key)) break;
+    seen.add(key);
+    const tuple: HeapTupleState | undefined = state.pages[cur.pageId]?.heap?.tuples[cur.slot];
+    if (!tuple) break;
+    out.push(tuple);
+    cur = tuple.next;
+  }
+  return out;
+}
+
+/** 一个键在堆里的全部版本（跨页扫描，仅用于检查器面板）。 */
+export function tupleVersionsOf(state: LabState, key: Key): { tid: Tid; tuple: HeapTupleState }[] {
+  const out: { tid: Tid; tuple: HeapTupleState }[] = [];
+  for (const p of heapPages(state)) {
+    p.heap?.tuples.forEach((t, slot) => {
+      if (t && t.key === key && t.lp !== 'unused') out.push({ tid: { pageId: p.id, slot }, tuple: t });
+    });
+  }
+  return out;
+}
+
+// ——— LSM 派生量 ————————————————————————————————————————
+
+/** 每层的文件数与条目数，供层级视图与指标面板使用。 */
+export function lsmLevelStats(l: LsmState): { level: number; files: number; entries: number; bytes: number }[] {
+  return l.levels.map((ids, level) => {
+    const ssts = ids.map((id) => l.ssts[id]).filter((s): s is SstState => !!s);
+    return {
+      level,
+      files: ssts.length,
+      entries: ssts.reduce((n, s) => n + s.entries.length, 0),
+      bytes: ssts.reduce((n, s) => n + s.bytes, 0),
+    };
+  });
+}
+
+/** 写放大：实际落盘条目数 / 用户写入条目数。压实越激进它越大。 */
+export function writeAmplification(l: LsmState): number {
+  return l.userWrites === 0 ? Number.NaN : l.entriesWritten / l.userWrites;
+}
+
+/** 空间放大：磁盘上的条目数 / 逻辑上仍存活的键数。 */
+export function spaceAmplification(l: LsmState): number {
+  const live = new Set<Key>();
+  let onDisk = 0;
+  for (const level of l.levels) {
+    for (const id of level) {
+      const sst = l.ssts[id];
+      if (!sst) continue;
+      onDisk += sst.entries.length;
+    }
+  }
+  // 从最新到最旧扫一遍，第一次见到的键才算「活」的。
+  for (const e of l.memtable.entries) if (!e.tombstone) live.add(e.key);
+  for (const level of l.levels) {
+    for (const id of level) {
+      const sst = l.ssts[id];
+      if (!sst) continue;
+      for (const e of sst.entries) if (!e.tombstone) live.add(e.key);
+    }
+  }
+  return live.size === 0 ? Number.NaN : onDisk / live.size;
+}
+
+/** LSM 里逻辑上仍然存在的键（memtable 优先、层号越小越新）。 */
+export function lsmLiveKeys(l: LsmState): Key[] {
+  const seen = new Map<Key, boolean>();
+  const consider = (e: SstEntryState) => {
+    if (!seen.has(e.key)) seen.set(e.key, !e.tombstone);
+  };
+  for (const e of l.memtable.entries) consider(e);
+  for (const level of l.levels) {
+    for (const id of level) {
+      const sst = l.ssts[id];
+      if (!sst) continue;
+      for (const e of sst.entries) consider(e);
+    }
+  }
+  return [...seen.entries()].filter(([, alive]) => alive).map(([k]) => k).sort((a, b) => a - b);
 }

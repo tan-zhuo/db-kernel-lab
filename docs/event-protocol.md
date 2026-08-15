@@ -112,6 +112,49 @@ type SimulationEvent = EventMeta & SimulationEventBody;
 | `OPERATOR_ROW` | 算子产出一行；`emitted=false` 表示这行被该算子过滤掉了 |
 | `OPERATOR_CLOSE` | 算子结束，带实际行数（与计划里的 `estRows` 对比即「估算 vs 实际」） |
 
+算子名分两套：InnoDB 世界是 `TableScan / IndexSeek / IndexRangeScan / RowIdLookup`，
+堆表世界是 `SeqScan / IndexScan / IndexOnlyScan / HeapFetch`（PostgreSQL 的叫法）。
+
+### 事务与 MVCC（PostgreSQL 堆表引擎）
+
+| 事件 | 语义 |
+|---|---|
+| `TXN_BEGIN` | 事务开始。`implicit=true` 表示这是「一条语句自成一个事务」的自动提交 |
+| `TXN_COMMIT` / `TXN_ABORT` | 提交 / 回滚，带该事务写过多少个版本 |
+| `SNAPSHOT_TAKE` | 取快照 `[xmin, xmax)` + 活跃事务列表。`scope='statement'` 是 READ COMMITTED 每条语句取一次；`scope='transaction'` 是 REPEATABLE READ 只在开始时取一次 —— **这条事件是隔离级别差异的唯一物理证据** |
+
+### 堆表
+
+| 事件 | 语义 |
+|---|---|
+| `PAGE_ALLOC` (`pageType='heap'`) | 新的堆页，携带 `blockNo` 与行指针容量 `slots` |
+| `HEAP_INSERT` | 在第 `slot` 个行指针写入一个新版本（`xmin` = 写它的事务），带该页剩余空槽数 |
+| `HEAP_SET_XMAX` | 给旧版本打上 `xmax`；`nextTid` 即 t_ctid，指向新版本。`hot=true` 表示新版本没有独立索引项 |
+| `LINE_POINTER` | 行指针状态变化：`normal` / `redirect`（HOT 链头被剪枝）/ `dead` / `unused`。**非 normal 的指针不再指向元组内容**，reducer 会把 row 与 next 清空 |
+| `HEAP_FETCH` | 索引项 → 堆元组的一跳，带沿 HOT 链走了几步。PostgreSQL 里**任何**索引扫描都会有它 |
+| `VISIBILITY_CHECK` | 一次可见性判定，带 `xmin` / `xmax` / 结论 / 中文理由 |
+| `HEAP_PRUNE` | VACUUM 清理一个堆页：移除的槽位、改成 redirect 的槽位、剩余空槽 |
+| `VISIBILITY_MAP` | 可见性映射位。VACUUM 置位为 all-visible，任何写入清位 —— Index Only Scan 能否省掉回堆全看它 |
+| `VACUUM_BEGIN` / `VACUUM_END` | VACUUM 起止，带清理的死元组数、索引项数、回收页数 |
+| `BLOAT_STAT` | 权威的活/死元组与堆页统计。堆表没有聚簇索引，`LabState.recordCount` 由它给出，因此**每条命令结束前都会发一条** |
+
+### LSM-Tree
+
+| 事件 | 语义 |
+|---|---|
+| `WAL_APPEND` | 写入先落 WAL（本仿真不做崩溃恢复重放，只体现「先写日志」的顺序） |
+| `MEMTABLE_PUT` | 写进 MemTable。`tombstone=true` 是删除，`overwrite=true` 是覆盖同键 |
+| `MEMTABLE_FREEZE` | MemTable 满了，整块冻结成不可变表等待刷盘 |
+| `SST_CREATE` | 生成一个 SST 文件，携带**全部条目**（键 + 行 + 是否墓碑）、层号、键区间、来源（`flush` / `compaction`） |
+| `SST_DROP` | 文件被压实吃掉或过期 |
+| `COMPACTION_BEGIN` / `COMPACTION_END` | 压实起止：输入/输出文件、进出条目数、丢弃了多少旧版本与墓碑 |
+| `BLOOM_PROBE` | 布隆过滤器探测。`maybe=false` ⇒ 整个文件跳过；`falsePositive=true` 是真实发生的假阳性 |
+| `SST_PROBE` | 真的打开一个文件读了一次（读放大 +1） |
+| `LSM_GET_RESULT` | 点查结果：命中在哪一层哪个文件、读了几个 SST、被布隆挡掉几个 |
+
+> LSM 的扫描结果不属于任何一个页（记录横跨 MemTable 与多个 SST），
+> 因此 `SCAN_STEP` 用哨兵页号 `0`（`LSM_VIRTUAL_PAGE`），reducer 只把它记进 `scanOutput`，不点亮任何页。
+
 ## 3. 顺序约定（reducer 依赖）
 
 * `PAGE_ALLOC` 必须先于任何引用该页的事件；
@@ -119,7 +162,14 @@ type SimulationEvent = EventMeta & SimulationEventBody;
 * 合并序列：`PAGE_MERGE` → `LEAF_LINK`/`PARENT_SET` → `SEPARATOR_DELETE` → `PAGE_FREE`；
 * 缓冲池序列：`PAGE_FLUSH?` → `BUFFER_EVICT` → `BUFFER_MISS` → `PAGE_READ`；
 * 查询序列：`INDEX_STATS*` → `PLAN_READY` → `OPERATOR_OPEN*` → （扫描/回表事件与 `OPERATOR_ROW` 交织）→ `OPERATOR_CLOSE*`；
-* 回表序列：`LOOKUP_BACK` → 聚簇索引的 `PAGE_READ`/`DESCEND` → `LOOKUP_DONE`。
+* 回表序列：`LOOKUP_BACK` → 聚簇索引的 `PAGE_READ`/`DESCEND` → `LOOKUP_DONE`；
+* 事务序列：`TXN_BEGIN` → (`SNAPSHOT_TAKE`)* → …DML/查询事件… → `TXN_COMMIT` / `TXN_ABORT`；
+* 更新序列（堆表）：`HEAP_INSERT`(新版本) → `HEAP_SET_XMAX`(旧版本) → 非 HOT 时才有索引的 `RECORD_INSERT`；
+* 回堆序列：索引的 `DESCEND`/`SCAN_STEP` → `PAGE_READ`(堆页) → `VISIBILITY_CHECK`* → `HEAP_FETCH`；
+* VACUUM 序列：`VACUUM_BEGIN` → (`LINE_POINTER` | `HEAP_PRUNE` | `RECORD_DELETE`)* → `VISIBILITY_MAP`* → `VACUUM_END`；
+* LSM 写序列：`WAL_APPEND` → `MEMTABLE_PUT` →（满了才有）`MEMTABLE_FREEZE` → `SST_CREATE`；
+* LSM 压实序列：`COMPACTION_BEGIN` → `SST_DROP`* → `SST_CREATE`* → `COMPACTION_END`；
+* LSM 读序列：`SEARCH_BEGIN` → (`BLOOM_PROBE`? → `SST_PROBE`?)* → `LSM_GET_RESULT` → `SEARCH_RESULT`。
 
 ## 4. 新增事件的步骤
 
@@ -140,8 +190,9 @@ type SimulationEvent = EventMeta & SimulationEventBody;
 
 ```jsonc
 {
-  "version": 1,
-  "engine": "InnoDB-like Clustered B+Tree",
+  "version": 2,
+  "engineId": "postgres-heap",
+  "engine": "PostgreSQL-like Heap + MVCC",
   "config": { "order": 4, "pageSize": 16384, "bufferPoolFrames": 8, "...": "..." },
   "commands": [ /* 命令日志，可用于确定性重放 */ ],
   "events":   [ /* 完整事件流 */ ]

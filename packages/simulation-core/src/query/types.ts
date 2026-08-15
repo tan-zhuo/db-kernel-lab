@@ -9,7 +9,19 @@ export type Predicate =
   | { kind: 'eq'; column: string; value: Key }
   | { kind: 'range'; column: string; from: Key; to: Key };
 
-export type PlanOp = 'Project' | 'Filter' | 'TableScan' | 'IndexSeek' | 'IndexRangeScan' | 'RowIdLookup';
+export type PlanOp =
+  // InnoDB 风格（聚簇索引世界）
+  | 'Project'
+  | 'Filter'
+  | 'TableScan'
+  | 'IndexSeek'
+  | 'IndexRangeScan'
+  | 'RowIdLookup'
+  // PostgreSQL 风格（堆表世界）
+  | 'SeqScan'
+  | 'IndexScan'
+  | 'IndexOnlyScan'
+  | 'HeapFetch';
 
 export interface PlanNode {
   id: string;
@@ -25,7 +37,7 @@ export interface PlanNode {
 
 export interface PlanCandidate {
   label: string;
-  strategy: 'table-scan' | 'index-seek' | 'index-range';
+  strategy: 'table-scan' | 'index-seek' | 'index-range' | 'seq-scan' | 'index-scan' | 'index-only-scan';
   indexId?: string;
   estRows: number;
   estCost: number;

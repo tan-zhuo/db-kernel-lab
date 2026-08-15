@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
-import { orderedIndexes, pageCountByIndex } from '@dbkl/simulation-core';
-import { useLabState, useSimStore } from '@/state/store';
+import { PRIMARY_INDEX_ID, orderedIndexes, pageCountByIndex } from '@dbkl/simulation-core';
+import { useCapability, useLabState, useSimStore } from '@/state/store';
 import { Field, Panel } from '@/components/ui/Panel';
 
 /**
@@ -12,6 +12,7 @@ export function IndexPanel() {
   const state = useLabState();
   const run = useSimStore((s) => s.run);
   const busy = useSimStore((s) => s.busy);
+  const hasHeap = useCapability('heap');
   const indexes = orderedIndexes(state);
 
   const indexable = (state.schema?.columns ?? []).filter(
@@ -23,7 +24,14 @@ export function IndexPanel() {
   const exists = indexes.some((ix) => ix.id === name);
 
   return (
-    <Panel title="索引" subtitle={`${indexes.length} 棵 B+ 树（含聚簇索引）`}>
+    <Panel
+      title="索引"
+      subtitle={
+        hasHeap
+          ? `${indexes.length} 棵 B 树（全部指向 TID，主键索引也不例外）`
+          : `${indexes.length} 棵 B+ 树（含聚簇索引）`
+      }
+    >
       <div className="flex flex-col gap-2">
         <ul className="flex flex-col gap-1">
           {indexes.map((ix) => {
@@ -36,11 +44,15 @@ export function IndexPanel() {
               >
                 <div className="min-w-0">
                   <div className="flex items-center gap-1.5">
-                    <span className={`num text-[12px] ${ix.clustered ? 'text-teal-500' : 'text-violet-400'}`}>
+                    <span
+                      className={`num text-[12px] ${
+                        ix.clustered || ix.id === PRIMARY_INDEX_ID ? 'text-teal-500' : 'text-violet-400'
+                      }`}
+                    >
                       {ix.name}
                     </span>
                     <span className="rounded bg-ink-700 px-1 text-[9px] text-mute-300">
-                      {ix.clustered ? '聚簇' : '二级'}
+                      {ix.clustered ? '聚簇' : ix.id === PRIMARY_INDEX_ID ? '主键' : '二级'}
                     </span>
                   </div>
                   <div className="num text-[10.5px] text-mute-400">
@@ -53,7 +65,7 @@ export function IndexPanel() {
                     )}
                   </div>
                 </div>
-                {!ix.clustered && (
+                {!ix.clustered && ix.id !== PRIMARY_INDEX_ID && (
                   <button
                     className="dbkl-btn shrink-0"
                     disabled={busy}

@@ -3,10 +3,16 @@
 > 在**纯浏览器**环境中实时观察、单步控制、对比实验数据库存储与执行内核的完整过程。
 > 无后端、无网络请求，`pnpm build` 产物可直接扔到 GitHub Pages / Vercel / Cloudflare Pages。
 
-当前实现：**Phase 0 全部 + Phase 1 验收清单全部达成**——
-可配置阶数的聚簇 B+ 树（插入 / 点查 / 范围扫描 / 删除 / 借位 / 合并）、**二级索引与回表**、
-**代价优化器与物理执行计划**、页结构与槽位目录、Buffer Pool（LRU / CLOCK）、
-事件溯源的时间旅行、Web Worker 仿真、IndexedDB 会话恢复、3D 场景与视频剪辑器式时间轴。
+当前实现：**Phase 0–3**，三种存储引擎可一键切换、并排对比：
+
+| 引擎 | 物理模型 | 你能亲眼看到的东西 |
+|---|---|---|
+| **MySQL · InnoDB** | 聚簇 B+ 树 | 页分裂/合并/借位、二级索引回表、覆盖索引、Buffer Pool（LRU / CLOCK）、代价优化器 |
+| **PostgreSQL · 堆表 + MVCC** | 无序堆文件 + 独立 B 树索引 | 索引只存 TID 所以**必须回堆一跳**、xmin/xmax 版本链、HOT 更新、死元组与表膨胀、VACUUM、可见性映射与 Index Only Scan、多会话下的隔离级别差异 |
+| **LSM-Tree（RocksDB 风格）** | MemTable + 分层 SST | 写只追加、MemTable 冻结刷盘、L0/L1 分层压实、墓碑回收、布隆过滤器、读/写/空间三种放大互相拉扯 |
+
+三个引擎共用同一套事件协议、时间轴与 UI —— 面板与 3D 视图按**引擎能力**挂载，
+所以「同一条 UPDATE 在三种数据库里各自发生了什么」可以直接切着看。
 
 ---
 
@@ -18,8 +24,8 @@ pnpm dev          # http://localhost:5173
 pnpm build        # 产出 apps/web/dist（纯静态）
 pnpm preview      # 本地预览构建产物
 
-pnpm test         # 单元测试（Vitest，68 项）
-pnpm test:e2e     # 端到端 / 关键路径测试（Playwright，10 项）
+pnpm test         # 单元测试（Vitest，109 项）
+pnpm test:e2e     # 端到端 / 关键路径测试（Playwright，18 项）
 pnpm typecheck    # 全仓库类型检查
 ```
 
@@ -31,11 +37,22 @@ pnpm typecheck    # 全仓库类型检查
 1. 左侧「引导实验」里点 **① 页分裂与树的生长** —— 自动搭好 order=4 的树并插入 12 行，然后自动回放。
 2. 用底部时间轴 **单步**（← →）观察：`定位 → 插入记录 → 页满 → 分裂 → 上浮分隔键 → 根页升高`。
 3. 点 **下一次分裂** 直接跳到下一处结构变更；按 **M** 打点，Shift+拖动轨道设置循环区间反复观看。
-4. 在 3D 场景里点任意页 → 右侧「页检查器」展开页头、槽位目录与行记录；按 **F** 飞入。
+4. 在 3D 场景里点任意页 → 右侧「检查器」展开页头、槽位目录与行记录；按 **F** 飞入。
 5. 再跑 **⑧ 二级索引与回表**：场景里会并排出现第二棵树，查询时一条粉色弧线从二级索引飞回聚簇索引 ——
    那就是回表。右侧「执行计划」面板同时给出算子树、估算 vs 实际行数与候选方案代价。
-6. 换成 **⑨ 覆盖索引** 对比：查询列全在索引里时 `RowIdLookup` 消失、逻辑读骤降。
-7. 换个参数（阶数 / 填充因子 / Buffer Pool 帧数 / 淘汰策略）→「应用并重置」→ 跑同一组操作，对比指标。
+6. 换个参数（阶数 / 填充因子 / Buffer Pool 帧数 / 淘汰策略）→「应用并重置」→ 跑同一组操作，对比指标。
+
+### 再花五分钟换个数据库
+
+7. 顶部左侧「存储引擎」切到 **PostgreSQL · 堆表 + MVCC**，跑引导实验 **① 索引不是表**：
+   索引树在上、堆文件在下，点查时一条蓝色弧线从索引项飞到堆里 —— 这一跳就是 InnoDB 没有的开销。
+8. 跑 **② UPDATE 写的是新版本**：同一行连改 4 次，堆里留下 4 个版本，粉色 t_ctid 链把它们串起来，
+   旧版本全变暗红（死元组），膨胀率冲到 50%。再跑 **④** 用 VACUUM 把它们清掉。
+9. 跑 **⑤/⑥** 对比隔离级别：同一个剧本（A 开事务读 → B 写入并提交 → A 再读），
+   READ COMMITTED 两次行数不同，REPEATABLE READ 两次完全一样 —— 快照面板里能看到 `[xmin, xmax)` 的区别。
+10. 再切到 **LSM-Tree**，跑 **② L0 堆满就压实**：MemTable 水位涨满 → 冻结 → 刷成 L0 砖块 →
+    三块凑齐触发压实、归并成 L1 上互不重叠的新砖。**横轴就是键空间**，所以「层内不重叠」是看出来的。
+11. 跑 **⑤/⑥** 对比布隆过滤器开关：同一次点查，开着时读放大接近 0，关掉后每层都得真读一遍文件。
 
 ## 快捷键
 
@@ -54,24 +71,52 @@ pnpm typecheck    # 全仓库类型检查
 db-kernel-lab/
 ├── apps/web/                       # Vite + React 19 + R3F 应用（纯客户端）
 │   └── src/
-│       ├── components/scene/       # 3D：B+ 树、连线、页标签、缓冲池、相机
-│       ├── components/panels/      # 操作、查询、索引、表结构、参数、执行计划、页检查器、指标、事件日志、引导实验
+│       ├── components/scene/       # 3D：B+ 树、堆文件、LSM 层级、连线、页标签、缓冲池、相机
+│       ├── components/panels/      # 引擎、操作、事务/MVCC、LSM、查询、索引、表结构、参数、执行计划、检查器、指标、事件日志、引导实验
 │       ├── components/timeline/    # 时间轴
 │       ├── state/store.ts          # zustand：游标、播放、命令日志
 │       ├── workers/                # 仿真 Worker 入口
 │       └── lib/                    # Worker 客户端、IndexedDB、Canvas 文字贴图
 ├── packages/
-│   ├── shared/                     # 基础类型、确定性 RNG、工具函数
-│   ├── simulation-core/            # ★ 事件协议 + B+ 树引擎（多索引）+ Buffer Pool + 优化器 + reducer + 历史管理
-│   └── visualization/              # 布局算法、配色、高亮衰减（纯 TS，无 React 依赖）
+│   ├── shared/                     # 基础类型（Key/Tid/Txid…）、确定性 RNG、工具函数
+│   ├── simulation-core/            # ★ 事件协议 + 三个引擎 + reducer + 历史管理
+│   │   ├── engine/bplus-tree.ts        #   可复用 B+ 树（InnoDB 与 PostgreSQL 共用）
+│   │   ├── engine/btree-engine.ts      #   InnoDB：聚簇索引 + 二级索引 + Buffer Pool
+│   │   ├── engine/heap-engine.ts       #   PostgreSQL：堆表 + MVCC + VACUUM
+│   │   ├── engine/lsm-engine.ts        #   LSM：MemTable + SST + 压实 + 布隆过滤器
+│   │   └── query/                      #   两套优化器（聚簇索引世界 / 堆表世界）
+│   └── visualization/              # 布局算法（树 / 堆 / LSM 层级）、配色、高亮衰减（纯 TS，无 React 依赖）
 ├── e2e/                            # Playwright 关键路径测试
 └── docs/                           # 架构 / 事件协议 / Phase 验收清单
 ```
 
+## 三种引擎的核心差别（也是这个项目存在的理由）
+
+| | InnoDB | PostgreSQL 堆表 | LSM |
+|---|---|---|---|
+| 表的物理形态 | 主键 B+ 树，叶子页就是数据 | 无序堆文件：行指针 + 元组 | MemTable + 分层 SST |
+| 主键点查 | 一次下降拿到整行 | 下降拿到 TID，**再回堆一跳** | 自上而下逐层探测 |
+| UPDATE | 就地改叶子记录 | 写新版本 + 旧版本打 xmax | 再追加一条新记录 |
+| DELETE | 页内删除，可能触发合并 | 打 xmax，成为死元组 | 写一条墓碑 |
+| 旧数据住哪 | Undo 日志（表外） | 就在表里 → 膨胀 → VACUUM | 下层文件 → 空间放大 → 压实 |
+| 二级索引项 | (列, 主键) | (列, TID) | 没有二级索引 |
+| 主要代价 | 回表的随机 IO | 回堆一跳 + 表膨胀 | 读/写/空间三种放大 |
+
 ## 设计要点
 
-* **多棵 B+ 树共存**：聚簇索引 + 若干二级索引，二级索引叶子项是 `(索引列, 主键)`，
-  因此非覆盖查询必须回表；每次 DML 都要维护所有索引，写放大在指标里直接可见。
+* **一棵 B+ 树，两种用法**：`BPlusTree` 被 InnoDB 与 PostgreSQL 共用，
+  差别只在宿主提供的 `tieBreak(row)` —— InnoDB 用主键给重复键定序，PostgreSQL 用 TID。
+  同一份分裂/合并/借位代码，跑出两种完全不同的物理语义。
+* **UI 只认能力，不认引擎**：面板与 3D 视图按 `EngineCapability`（`btree` / `heap` / `lsm` /
+  `mvcc` / `buffer-pool`…）挂载，代码里一行 `if (引擎 === 'postgres')` 都没有。
+  第三方引擎声明同样的能力就能复用全部视图。
+* **MVCC 是真的跑出来的**：仿真单线程，但 `use_session` 允许多个事务同时进行，
+  所以「不可重复读」是实验结果而不是文案 —— READ COMMITTED 每条语句取快照，
+  REPEATABLE READ 在 BEGIN 时钉死快照，两者的 `SNAPSHOT_TAKE` 事件次数一眼可辨。
+* **布隆过滤器是真实现**：位数组 + 双哈希，因此假阳性会自然发生，
+  事件日志里能看到「布隆说可能有 → 读了文件 → 其实没有」这条完整链路。
+* **LSM 的横轴就是键空间**：每块砖的左右边界 = 那个 SST 的 `[minKey, maxKey]`，
+  于是「L0 互相重叠、L1+ 绝不重叠」变成几何事实，不是要背的结论。
 * **优化器是可解释的**：统计信息 → 候选方案代价 → 物理计划全部作为事件落盘，
   面板里能同时看到「估算行数 vs 实际行数」和「为什么没走索引」。
 * **事件驱动一切**：引擎只产生 `SimulationEvent`，UI 只消费事件归约出的 `LabState`。
@@ -88,7 +133,9 @@ db-kernel-lab/
 
 ## 与真实数据库的差异
 
-仿真的目标是**语义正确**而非字节级兼容。所有已知简化点都集中记录在
+仿真的目标是**语义正确**而非字节级兼容：MVCC 的可见性规则、HOT 的成立条件、
+压实什么时候敢丢墓碑，这些都按真实语义实现；但页里的字节布局、锁等待、崩溃恢复不建模。
+所有已知简化点都集中记录在
 [docs/architecture.md#简化点与真实系统的差异](docs/architecture.md#简化点与真实系统的差异)，
 包括：页容量由 order 而非字节决定、无 pin 计数、无 MVCC/Undo/Redo、单线程无并发控制等。
 
@@ -98,9 +145,9 @@ db-kernel-lab/
 |---|---|---|
 | 0 | 脚手架 / 3D 场景 / 时间轴 / Worker / B+ 树插入分裂回放 | ✅ 已完成 |
 | 1 | B+ 树 CRUD、页结构、Buffer Pool、二级索引与回表、执行计划、IndexedDB 恢复 | ✅ 验收项全部达成；⏳ 剩 3D 页内微观视图与算子间粒子动画 |
-| 2 | PostgreSQL 堆表对比、MVCC 版本链、ALTER TABLE | ⏳ 计划中 |
-| 3 | LSM-Tree（MemTable/SST/Compaction）、列存 | ⏳ 计划中 |
-| 4 | Redo/WAL、崩溃恢复、锁与死锁、隔离级别 | ⏳ 计划中 |
+| 2 | PostgreSQL 堆表、MVCC 版本链、HOT、VACUUM、隔离级别、可见性映射 | ✅ 验收项达成；⏳ 剩 ALTER TABLE 重写过程 |
+| 3 | LSM-Tree（MemTable / SST / 压实 / 布隆过滤器 / 三种放大） | ✅ 验收项达成；⏳ 剩列存与块缓存 |
+| 4 | Redo/WAL、崩溃恢复、**行锁与死锁**、可串行化 | ⏳ 计划中（Phase 2 的写冲突目前直接报错而非阻塞） |
 | 5 | Region / Raft / 分布式事务 | ⏳ 计划中 |
 | 6 | 插件系统、对比报告、录制导出 | ⏳ 计划中 |
 

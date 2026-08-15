@@ -128,9 +128,10 @@ export function layoutTree(state: LabState, options: Partial<LayoutOptions> = {}
   }
 
   // 尚未挂到任何索引上的页（分裂动画中间态）也要渲染出来。
+  // 堆页不属于任何索引树，由 layoutHeap 单独排布在树的下方。
   for (const key in state.pages) {
     const p = state.pages[key];
-    if (placed.has(p.id)) continue;
+    if (placed.has(p.id) || p.type === 'heap') continue;
     const node = makeNode(p.id, state, opt, width, capacity, cursorX + width / 2, p.level * opt.levelGap, false);
     nodes.push(node);
     byId.set(p.id, node);

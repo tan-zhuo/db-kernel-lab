@@ -1,9 +1,14 @@
 import { BTreeEngine } from './btree-engine';
+import { PostgresHeapEngine } from './heap-engine';
+import { LsmEngine } from './lsm-engine';
 import type { EngineConfig, EngineFactory, StorageEngine } from './types';
 
 /**
- * 引擎注册表。Phase 0 只有一个 B+ 树引擎；
- * Postgres 堆表 / LSM / 列存在后续 Phase 以同样方式注册（也支持动态 import 的用户插件）。
+ * 引擎注册表。
+ *
+ * 每个引擎都实现同一个 `StorageEngine` 接口、只通过事件对外表达状态，
+ * 因此可视化层不需要知道自己在画哪一种数据库 —— 它只按 `capabilities` 决定挂哪些视图。
+ * 用户插件可以走动态 `import()` 后 `registerEngine()`，协议与内置引擎完全一致。
  */
 const registry = new Map<string, EngineFactory>();
 
@@ -26,11 +31,32 @@ export function createEngine(id: string, config: EngineConfig): StorageEngine {
 }
 
 export const INNODB_BTREE_ENGINE_ID = 'innodb-btree';
+export const POSTGRES_HEAP_ENGINE_ID = 'postgres-heap';
+export const LSM_ENGINE_ID = 'lsm-tree';
+
+/** 默认引擎：Phase 1 的 InnoDB 聚簇 B+ 树。 */
+export const DEFAULT_ENGINE_ID = INNODB_BTREE_ENGINE_ID;
 
 registerEngine({
   id: INNODB_BTREE_ENGINE_ID,
-  label: 'InnoDB 风格聚簇 B+ 树',
-  description: '聚簇索引 + 页分裂/合并 + Buffer Pool（LRU / CLOCK）',
-  capabilities: ['btree', 'clustered-index', 'buffer-pool'],
+  label: 'MySQL · InnoDB',
+  description: '聚簇 B+ 树：主键索引就是表本身，二级索引存 (列, 主键) 因而需要回表',
+  capabilities: ['btree', 'clustered-index', 'secondary-index', 'buffer-pool'],
   create: (config) => new BTreeEngine(config),
+});
+
+registerEngine({
+  id: POSTGRES_HEAP_ENGINE_ID,
+  label: 'PostgreSQL · 堆表 + MVCC',
+  description: '无序堆文件 + 独立 B 树索引：任何索引扫描都要回堆一跳，更新写新版本、靠 VACUUM 回收',
+  capabilities: ['btree', 'secondary-index', 'heap', 'mvcc', 'vacuum', 'transactions', 'buffer-pool'],
+  create: (config) => new PostgresHeapEngine(config),
+});
+
+registerEngine({
+  id: LSM_ENGINE_ID,
+  label: 'LSM-Tree · RocksDB 风格',
+  description: '写入只追加进 MemTable，冻结后刷成 SST 并逐层压实；读要自上而下探测，靠布隆过滤器减少读放大',
+  capabilities: ['lsm', 'compaction', 'bloom-filter', 'wal'],
+  create: (config) => new LsmEngine(config),
 });

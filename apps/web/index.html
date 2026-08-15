@@ -3,16 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>DB Kernel Lab · 数据库内核可视化实验室 | B+ 树 / 二级索引 / Buffer Pool 3D 仿真</title>
+    <title>DB Kernel Lab · 数据库内核可视化实验室 | InnoDB B+ 树 / PostgreSQL 堆表 MVCC / LSM-Tree 3D 仿真</title>
 
     <!-- ——— SEO ——————————————————————————————————————————— -->
     <meta
       name="description"
-      content="DB Kernel Lab 是一个纯前端的数据库执行与存储内核可视化学习科研平台：在浏览器里 3D 观察 InnoDB 风格聚簇 B+ 树的页分裂与合并、二级索引回表、Buffer Pool LRU/CLOCK 淘汰与查询优化器的代价选择，支持逐事件时间旅行回放。"
+      content="DB Kernel Lab 是一个纯前端的数据库执行与存储内核可视化学习科研平台：在浏览器里并排对比三种存储引擎 —— InnoDB 聚簇 B+ 树的页分裂与回表、PostgreSQL 堆表的 MVCC 版本链 / HOT 更新 / VACUUM / 隔离级别、LSM-Tree 的 MemTable 刷写与分层压实，全部支持逐事件时间旅行回放。"
     />
     <meta
       name="keywords"
-      content="数据库内核,B+树可视化,InnoDB,聚簇索引,二级索引,回表,Buffer Pool,LRU,查询优化器,执行计划,页分裂,数据库教学,3D 可视化,database internals,btree visualization"
+      content="数据库内核,B+树可视化,InnoDB,聚簇索引,二级索引,回表,Buffer Pool,LRU,查询优化器,执行计划,页分裂,PostgreSQL,堆表,MVCC,版本链,HOT 更新,VACUUM,可见性映射,隔离级别,快照,LSM-Tree,MemTable,SST,压实,布隆过滤器,读写空间放大,数据库教学,3D 可视化,database internals,btree visualization,mvcc visualization,lsm tree visualization"
     />
     <meta name="author" content="DB Kernel Lab" />
     <meta name="robots" content="index, follow" />
@@ -25,14 +25,14 @@
     <meta property="og:title" content="DB Kernel Lab · 数据库内核可视化实验室" />
     <meta
       property="og:description"
-      content="在浏览器里 3D 观察 B+ 树页分裂、二级索引回表、Buffer Pool 淘汰与查询优化器选择，逐事件时间旅行回放。纯前端，无需后端。"
+      content="三种存储引擎并排对比：InnoDB 聚簇 B+ 树、PostgreSQL 堆表 + MVCC、LSM-Tree 分层压实。3D 观察、逐事件时间旅行回放。纯前端，无需后端。"
     />
     <meta property="og:url" content="https://tan-zhuo.github.io/db-kernel-lab/" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="DB Kernel Lab · 数据库内核可视化实验室" />
     <meta
       name="twitter:description"
-      content="纯前端的数据库存储与执行内核 3D 仿真：B+ 树、二级索引回表、Buffer Pool、查询优化器与时间旅行回放。"
+      content="纯前端的数据库存储与执行内核 3D 仿真：InnoDB B+ 树、PostgreSQL 堆表 MVCC、LSM-Tree 压实，以及时间旅行回放。"
     />
 
     <script type="application/ld+json">
@@ -43,7 +43,7 @@
         "alternateName": "数据库内核可视化学习科研平台",
         "applicationCategory": "EducationalApplication",
         "operatingSystem": "Any (Web Browser)",
-        "description": "纯前端的数据库执行与存储内核可视化平台：3D 呈现 InnoDB 风格聚簇 B+ 树的页分裂/合并、二级索引与回表、Buffer Pool 淘汰、查询优化器代价选择，并支持逐事件时间旅行回放。",
+        "description": "纯前端的数据库执行与存储内核可视化平台：3D 呈现三种存储引擎 —— InnoDB 聚簇 B+ 树（页分裂/合并、二级索引与回表）、PostgreSQL 堆表（MVCC 版本链、HOT 更新、VACUUM、隔离级别）、LSM-Tree（MemTable 刷写、分层压实、布隆过滤器），并支持逐事件时间旅行回放。",
         "inLanguage": "zh-CN",
         "isAccessibleForFree": true,
         "offers": { "@type": "Offer", "price": "0", "priceCurrency": "CNY" },
@@ -52,6 +52,12 @@
           "二级索引与回表路径可视化",
           "Buffer Pool LRU / CLOCK 淘汰与命中率仿真",
           "代价优化器：全表扫描 vs 索引扫描 vs 覆盖索引",
+          "PostgreSQL 堆表：TID 索引、回堆一跳、行指针与死元组",
+          "MVCC：xmin/xmax 可见性判定、t_ctid 版本链、HOT 更新",
+          "多会话事务：READ COMMITTED 与 REPEATABLE READ 的差异可复现",
+          "VACUUM、表膨胀率、可见性映射与 Index Only Scan",
+          "LSM-Tree：MemTable 刷写、L0/L1 分层压实、墓碑回收",
+          "布隆过滤器与读放大 / 写放大 / 空间放大的相互制约",
           "事件溯源的时间旅行回放与实验导出"
         ]
       }
@@ -184,9 +190,10 @@
       </svg>
       <h1 class="dbkl-boot-title">DB Kernel Lab · 数据库内核可视化实验室</h1>
       <p class="dbkl-boot-sub">
-        纯前端的数据库执行与存储内核仿真平台：在浏览器里 3D 观察 InnoDB 风格聚簇 B+ 树的页分裂与合并、
-        二级索引回表、Buffer Pool 的 LRU / CLOCK 淘汰，以及查询优化器在全表扫描与索引之间的代价权衡，
-        全部支持逐事件时间旅行回放。
+        纯前端的数据库执行与存储内核仿真平台：在浏览器里并排对比三种存储引擎 ——
+        InnoDB 的聚簇 B+ 树（页分裂、二级索引回表、Buffer Pool 淘汰）、
+        PostgreSQL 的堆表（MVCC 版本链、HOT 更新、VACUUM 与隔离级别）、
+        以及 LSM-Tree（MemTable 刷写、分层压实、布隆过滤器），全部支持逐事件时间旅行回放。
       </p>
       <div class="dbkl-boot-bar"><span></span></div>
       <p class="dbkl-boot-step" id="dbkl-boot-step">正在加载仿真内核…</p>
@@ -196,6 +203,12 @@
         <span>回表与覆盖索引</span>
         <span>Buffer Pool LRU / CLOCK</span>
         <span>代价优化器与执行计划</span>
+        <span>PostgreSQL 堆表与 TID</span>
+        <span>MVCC 版本链与可见性</span>
+        <span>HOT 更新 / VACUUM / 表膨胀</span>
+        <span>隔离级别对比实验</span>
+        <span>LSM MemTable 与 SST 压实</span>
+        <span>布隆过滤器与三种放大</span>
         <span>事件溯源时间旅行</span>
         <span>Web Worker 仿真</span>
         <span>IndexedDB 会话恢复</span>

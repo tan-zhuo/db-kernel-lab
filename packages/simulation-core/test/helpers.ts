@@ -1,9 +1,16 @@
 import { expect } from 'vitest';
 import type { Key, PageId } from '@dbkl/shared';
-import { PRIMARY_INDEX_ID, type EngineConfig, type StructuralIndex, type StructuralSnapshot } from '../src';
+import {
+  DEFAULT_ENGINE_CONFIG,
+  PRIMARY_INDEX_ID,
+  type EngineConfig,
+  type StructuralIndex,
+  type StructuralSnapshot,
+} from '../src';
 
 export function config(patch: Partial<EngineConfig> = {}): EngineConfig {
   return {
+    ...DEFAULT_ENGINE_CONFIG,
     order: 4,
     pageSize: 16384,
     bufferPoolFrames: 8,
@@ -26,8 +33,10 @@ export function checkInvariants(snap: StructuralSnapshot, cfg: EngineConfig, str
   for (const ix of Object.values(snap.indexes)) {
     visitedTotal += checkIndex(snap, ix, cfg, strictMinFill);
   }
-  // 没有游离页：所有页都必须能从某棵索引的根页到达
-  expect(visitedTotal, 'no orphan pages').toBe(Object.keys(snap.pages).length);
+  // 没有游离页：所有**索引**页都必须能从某棵索引的根页到达。
+  // 堆页不属于任何索引（PostgreSQL 引擎），单独排除。
+  const indexPages = Object.values(snap.pages).filter((p) => p.type !== 'heap').length;
+  expect(visitedTotal, 'no orphan pages').toBe(indexPages);
 }
 
 function checkIndex(snap: StructuralSnapshot, ix: StructuralIndex, cfg: EngineConfig, strictMinFill: boolean): number {

@@ -1,8 +1,10 @@
 /// <reference lib="webworker" />
 import {
-  BTreeEngine,
+  DEFAULT_ENGINE_ID,
   EVENT_CHUNK_SIZE,
+  createEngine,
   type SimulationEvent,
+  type StorageEngine,
   type WorkerRequest,
   type WorkerResponse,
 } from '@dbkl/simulation-core';
@@ -12,9 +14,12 @@ import {
  *
  * 批量插入十万级事件时，事件按 chunk 回传，主线程可以边收边画，
  * 不会因为一次巨大的 postMessage 而掉帧。
+ *
+ * 引擎由 `engineId` 从注册表里取（InnoDB / PostgreSQL 堆表 / LSM），
+ * Worker 本身对具体引擎一无所知 —— 它只搬运命令与事件。
  */
 
-let engine: BTreeEngine | null = null;
+let engine: StorageEngine | null = null;
 
 function post(message: WorkerResponse): void {
   (self as unknown as DedicatedWorkerGlobalScope).postMessage(message);
@@ -38,11 +43,12 @@ self.onmessage = (message: MessageEvent<WorkerRequest>) => {
     switch (req.type) {
       case 'init':
       case 'reset': {
-        engine = new BTreeEngine(req.config);
+        const engineId = req.engineId ?? DEFAULT_ENGINE_ID;
+        engine = createEngine(engineId, req.config);
         post({
           type: 'ready',
           requestId: req.requestId,
-          engine: { name: engine.name, capabilities: engine.capabilities },
+          engine: { id: engineId, name: engine.name, capabilities: engine.capabilities },
         });
         const replayCommands = req.type === 'init' ? (req.replay ?? []) : [];
         if (replayCommands.length === 0) {

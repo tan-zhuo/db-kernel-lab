@@ -15,7 +15,7 @@ export class SimulationClient {
   private worker: Worker;
   private nextId = 1;
   private pending = new Map<number, Pending>();
-  private engineInfo: { name: string; capabilities: readonly string[] } | null = null;
+  private engineInfo: { id: string; name: string; capabilities: readonly string[] } | null = null;
 
   constructor() {
     this.worker = new Worker(new URL('../workers/simulation.worker.ts', import.meta.url), {
@@ -29,16 +29,16 @@ export class SimulationClient {
     };
   }
 
-  get engine(): { name: string; capabilities: readonly string[] } | null {
+  get engine(): { id: string; name: string; capabilities: readonly string[] } | null {
     return this.engineInfo;
   }
 
-  init(config: EngineConfig, replay: Command[] | undefined, onEvents: EventSink): Promise<void> {
-    return this.request((requestId) => ({ type: 'init', requestId, config, replay }), onEvents);
+  init(engineId: string, config: EngineConfig, replay: Command[] | undefined, onEvents: EventSink): Promise<void> {
+    return this.request((requestId) => ({ type: 'init', requestId, engineId, config, replay }), onEvents);
   }
 
-  reset(config: EngineConfig, onEvents: EventSink): Promise<void> {
-    return this.request((requestId) => ({ type: 'reset', requestId, config }), onEvents);
+  reset(engineId: string, config: EngineConfig, onEvents: EventSink): Promise<void> {
+    return this.request((requestId) => ({ type: 'reset', requestId, engineId, config }), onEvents);
   }
 
   run(command: Command, onEvents: EventSink): Promise<void> {

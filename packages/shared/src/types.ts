@@ -11,6 +11,44 @@ export type PageId = number;
 /** 索引键。Phase 0 仅支持整型主键。 */
 export type Key = number;
 
+/** 事务号（对应 PostgreSQL 的 xid / InnoDB 的 trx_id），单调递增。 */
+export type Txid = number;
+
+/**
+ * 元组标识符，对应 PostgreSQL 的 ctid = (块号, 行指针下标)。
+ *
+ * 这是「堆表 + 独立索引」模型的核心：索引项存的是 TID 而不是主键，
+ * 因此**任何**索引扫描都必须再去堆里取一次行（与 InnoDB 的聚簇索引形成对照）。
+ */
+export interface Tid {
+  pageId: PageId;
+  slot: number;
+}
+
+/**
+ * 行指针（PostgreSQL 的 ItemId / lp_flags）状态。
+ *
+ *  - `normal`：指向一个真实元组；
+ *  - `redirect`：HOT 链的头被剪枝后留下的重定向指针（索引项不用改）；
+ *  - `dead`：元组已被清理，但行指针还不能回收（索引项还指着它）；
+ *  - `unused`：可以被新元组复用。
+ */
+export type LinePointerState = 'normal' | 'redirect' | 'dead' | 'unused';
+
+/** TID 的可比较编码：用于在允许重复键的索引里给相等键定序。 */
+export function packTid(tid: Tid): number {
+  return tid.pageId * 4096 + tid.slot;
+}
+
+export function formatTid(tid: Tid | null): string {
+  return tid === null ? '∅' : `(${tid.pageId},${tid.slot})`;
+}
+
+export function sameTid(a: Tid | null, b: Tid | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.pageId === b.pageId && a.slot === b.slot;
+}
+
 /** 列值。 */
 export type Value = string | number | boolean | null;
 
@@ -34,8 +72,16 @@ export interface TableSchema {
   primaryKey: string;
 }
 
-/** 页类型。Phase 0 只有 B+ 树的内部页与叶子页。 */
-export type PageType = 'leaf' | 'internal';
+/**
+ * 页类型。
+ *
+ *  - `leaf` / `internal`：B+ 树的叶子页与内部页（InnoDB 与 PostgreSQL 的索引都用它）；
+ *  - `heap`：PostgreSQL 风格的堆表数据页 —— 无序、由行指针数组 + 元组组成。
+ */
+export type PageType = 'leaf' | 'internal' | 'heap';
+
+/** 事务隔离级别（Phase 2 实现前两级，可串行化留给 Phase 4 的锁）。 */
+export type IsolationLevel = 'read-committed' | 'repeatable-read';
 
 /** 缓冲池淘汰策略。 */
 export type EvictionPolicy = 'LRU' | 'CLOCK';
@@ -55,7 +101,16 @@ export type CommandKind =
   | 'query'
   | 'flush'
   | 'configure'
-  | 'reset';
+  | 'reset'
+  // Phase 2：PostgreSQL 堆表 + MVCC
+  | 'begin_txn'
+  | 'commit_txn'
+  | 'abort_txn'
+  | 'vacuum'
+  | 'use_session'
+  // Phase 3：LSM-Tree
+  | 'flush_memtable'
+  | 'compact';
 
 /** 列的字节宽度估算，用于页填充率显示（简化模型，见 docs/architecture.md 的“简化点”）。 */
 export function columnWidth(col: ColumnDef): number {

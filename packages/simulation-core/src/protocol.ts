@@ -17,6 +17,8 @@ export interface RunCommandRequest {
 export interface InitRequest {
   type: 'init';
   requestId: number;
+  /** 引擎 id（见 engine/registry.ts）。省略则用默认引擎。 */
+  engineId?: string;
   config: EngineConfig;
   /** 重放命令日志以恢复上次会话（引擎确定性保证事件流一致）。 */
   replay?: Command[];
@@ -25,6 +27,7 @@ export interface InitRequest {
 export interface ResetRequest {
   type: 'reset';
   requestId: number;
+  engineId?: string;
   config: EngineConfig;
 }
 
@@ -43,7 +46,7 @@ export interface EventsResponse {
 export interface ReadyResponse {
   type: 'ready';
   requestId: number;
-  engine: { name: string; capabilities: readonly string[] };
+  engine: { id: string; name: string; capabilities: readonly string[] };
 }
 
 export interface ErrorResponse {

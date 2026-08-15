@@ -11,15 +11,22 @@ const CATEGORY_STYLE: Record<EventCategory, string> = {
   buffer: 'text-orange-500',
   access: 'text-amber-500',
   plan: 'text-teal-500',
+  txn: 'text-accent-400',
+  mvcc: 'text-violet-400',
+  lsm: 'text-teal-500',
 };
 
-const FILTERS: { id: 'all' | EventCategory; label: string }[] = [
+/** 过滤按钮：只显示当前引擎真正会产生的分类（由 capabilities 决定）。 */
+const FILTERS: { id: 'all' | EventCategory; label: string; capability?: string }[] = [
   { id: 'all', label: '全部' },
   { id: 'structure', label: '结构' },
   { id: 'record', label: '记录' },
-  { id: 'buffer', label: '缓冲池' },
+  { id: 'buffer', label: '缓冲池', capability: 'buffer-pool' },
   { id: 'access', label: '访问' },
   { id: 'plan', label: '计划' },
+  { id: 'txn', label: '事务', capability: 'transactions' },
+  { id: 'mvcc', label: 'MVCC', capability: 'mvcc' },
+  { id: 'lsm', label: 'LSM', capability: 'lsm' },
 ];
 
 /** 事件日志：游标附近的窗口，点击任意行即可把整个实验跳到那一刻。 */
@@ -29,7 +36,9 @@ export function EventLogPanel() {
   const history = useSimStore((s) => s.history);
   const goTo = useSimStore((s) => s.goTo);
   const [filter, setFilter] = useState<'all' | EventCategory>('all');
+  const capabilities = useSimStore((s) => s.capabilities);
   const listRef = useRef<HTMLDivElement>(null);
+  const filters = FILTERS.filter((f) => !f.capability || capabilities.includes(f.capability));
 
   const rows = useMemo(() => {
     void version;
@@ -57,7 +66,7 @@ export function EventLogPanel() {
       subtitle={`${history.length} 个事件 · 游标 ${cursor}`}
       right={
         <div className="flex gap-1">
-          {FILTERS.map((f) => (
+          {filters.map((f) => (
             <button
               key={f.id}
               className={`rounded px-1.5 py-0.5 text-[10px] ${
