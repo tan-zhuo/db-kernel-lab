@@ -74,7 +74,7 @@ test('PostgreSQL：索引扫描必须回堆，指标里能看到这笔开销', a
 
   // 查一个确实存在的键，否则索引下降就直接落空、根本走不到回堆那一步
   await page.getByLabel('主键 key').fill('7');
-  await page.getByRole('button', { name: '点查' }).click();
+  await page.getByTestId('op-search').click();
   await page.getByTitle('跳到结尾 (End)').click();
   await expect(statValue(page, '回堆')).not.toHaveText('0');
   expect(errors).toEqual([]);
@@ -153,7 +153,7 @@ test('LSM：删除写墓碑，SST 检查器里能看到它', async ({ page }) =>
   await switchEngine(page, 'lsm-tree', /LSM-Tree \(RocksDB-like\)/);
   await bulkInsert(page, 12);
 
-  await page.getByRole('button', { name: '删除' }).click();
+  await page.getByTestId('op-delete').click();
   await page.getByTestId('flush-memtable').click();
   await page.getByTitle('跳到结尾 (End)').click();
   await expect(page.getByText(/写墓碑|墓碑/).first()).toBeVisible();
@@ -223,6 +223,73 @@ test('LSM：数据落盘后 WAL 段被回收，不会无限增长', async ({ pag
   await page.getByTitle('跳到结尾 (End)').click();
   await expect(page.getByTestId('wal-retained')).toHaveText('0 条待恢复');
   await expect(page.getByText(/已回收 \d+ 条/)).toBeVisible();
+});
+
+test('列存：只读用到的列，区间统计整块跳过', async ({ page }) => {
+  const errors = collectErrors(page);
+  await page.goto('/');
+  await waitForReady(page);
+  await switchEngine(page, 'columnar', /Columnar \(ClickHouse-like\)/);
+  await bulkInsert(page, 24);
+
+  await expect(statValue(page, '行组').first()).not.toHaveText('0');
+  await expect(statValue(page, '压缩比').first()).not.toHaveText('—');
+
+  // 只取一列：IO 账单应显示只读了 1 列
+  await page.getByTestId('q-projection').selectOption('covering');
+  await page.getByTestId('q-run').click();
+  await page.getByTitle('跳到结尾 (End)').click();
+  await expect(page.getByText(/本次查询的 IO 账单/)).toBeVisible();
+  await expect(page.getByText(/省了 \d+% 的 IO/)).toBeVisible();
+
+  expect(errors).toEqual([]);
+});
+
+test('列存：区间统计能跳过整个行组', async ({ page }) => {
+  await page.goto('/');
+  await waitForReady(page);
+  await switchEngine(page, 'columnar', /Columnar \(ClickHouse-like\)/);
+
+  await page.getByTestId('scenario-col-zonemap').click();
+  await expect(page.getByText(/跳过行组/).first()).toBeVisible({ timeout: 40_000 });
+  await page.getByTitle('跳到结尾 (End)').click();
+  await expect(page.getByText(/一个字节都不用读/).first()).toBeVisible();
+});
+
+test('KV 哈希：点查一次寻址，范围扫描直接拒绝', async ({ page }) => {
+  const errors = collectErrors(page);
+  await page.goto('/');
+  await waitForReady(page);
+  await switchEngine(page, 'kv-hash', /KV Hash Index \(Bitcask-like\)/);
+  await bulkInsert(page, 16);
+
+  await expect(statValue(page, '键数')).toHaveText('16');
+  await expect(statValue(page, '索引内存').first()).not.toHaveText('0 B');
+
+  // 点查：一次哈希 + 一次磁盘读
+  await page.getByLabel('主键 key').fill('7');
+  await page.getByTestId('op-search').click();
+  await page.getByTitle('跳到结尾 (End)').click();
+  await expect(page.getByText(/一次磁盘读/).first()).toBeVisible();
+
+  // 范围扫描：必须明确拒绝并说明理由
+  await page.getByTestId('op-range').click();
+  await expect(page.getByText(/哈希把键打散了/).first()).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test('KV 哈希：覆盖写产生垃圾，合并能回收', async ({ page }) => {
+  await page.goto('/');
+  await waitForReady(page);
+  await switchEngine(page, 'kv-hash', /KV Hash Index \(Bitcask-like\)/);
+
+  await page.getByTestId('scenario-kv-garbage').click();
+  await expect(page.getByText(/合并结束/).first()).toBeVisible({ timeout: 60_000 });
+  await page.getByTitle('跳到结尾 (End)').click();
+
+  // 合并之后键数不变、垃圾被回收
+  await expect(statValue(page, '键数')).toHaveText('8');
+  await expect(page.getByText(/上次合并：保留/)).toBeVisible();
 });
 
 test('会话持久化：刷新后仍然停在换过的引擎上', async ({ page }) => {

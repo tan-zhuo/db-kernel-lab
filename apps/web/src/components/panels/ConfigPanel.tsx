@@ -20,6 +20,8 @@ export function ConfigPanel() {
   const hasBTree = useCapability('btree');
   const hasHeap = useCapability('heap');
   const hasLsm = useCapability('lsm');
+  const hasColumnar = useCapability('columnar');
+  const hasKv = useCapability('kv');
   const hasBufferPool = useCapability('buffer-pool');
   const hasTransactions = useCapability('transactions');
   const [draft, setDraft] = useState<EngineConfig>(config);
@@ -245,6 +247,96 @@ export function ConfigPanel() {
                   <option value="leveled">leveled（层内不重叠，读放大低）</option>
                   <option value="tiered">tiered（整层归并，层内可重叠）</option>
                 </select>
+              </Field>
+            </div>
+          </>
+        )}
+
+        {/* —— 列存 —— */}
+        {hasColumnar && (
+          <>
+            <Field label="行组大小" hint="多少行切一块">
+              <input
+                className="dbkl-input"
+                type="number"
+                data-testid="cfg-rowgroup"
+                min={1}
+                max={64}
+                value={draft.rowGroupSize}
+                onChange={(e) => patch({ rowGroupSize: Math.min(64, Math.max(1, Number(e.target.value))) })}
+              />
+            </Field>
+            <Field label="向量批大小" hint="一次处理几行">
+              <input
+                className="dbkl-input"
+                type="number"
+                min={1}
+                max={32}
+                value={draft.vectorBatchSize}
+                onChange={(e) => patch({ vectorBatchSize: Math.min(32, Math.max(1, Number(e.target.value))) })}
+              />
+            </Field>
+            <Field label="列编码" hint="auto 按基数自动挑">
+              <select
+                className="dbkl-input"
+                data-testid="cfg-encoding"
+                value={draft.columnEncoding}
+                onChange={(e) => patch({ columnEncoding: e.target.value as EngineConfig['columnEncoding'] })}
+              >
+                <option value="auto">auto（自动）</option>
+                <option value="plain">plain（原样，作对照）</option>
+                <option value="dictionary">dictionary（字典）</option>
+                <option value="rle">rle（游程）</option>
+              </select>
+            </Field>
+            <div className="flex items-end">
+              <label className="flex items-center gap-2 text-[11px] text-mute-300">
+                <input
+                  type="checkbox"
+                  data-testid="cfg-zonemaps"
+                  checked={draft.zoneMaps}
+                  onChange={(e) => patch({ zoneMaps: e.target.checked })}
+                />
+                区间统计剪枝
+              </label>
+            </div>
+          </>
+        )}
+
+        {/* —— 哈希 KV —— */}
+        {hasKv && (
+          <>
+            <Field label="哈希桶数" hint="少了冲突链就长">
+              <input
+                className="dbkl-input"
+                type="number"
+                data-testid="cfg-buckets"
+                min={1}
+                max={128}
+                value={draft.kvHashBuckets}
+                onChange={(e) => patch({ kvHashBuckets: Math.min(128, Math.max(1, Number(e.target.value))) })}
+              />
+            </Field>
+            <Field label="日志文件容量" hint="写满几条就封口">
+              <input
+                className="dbkl-input"
+                type="number"
+                min={1}
+                max={64}
+                value={draft.kvLogFileRecords}
+                onChange={(e) => patch({ kvLogFileRecords: Math.min(64, Math.max(1, Number(e.target.value))) })}
+              />
+            </Field>
+            <div className="col-span-2">
+              <Field label="合并阈值" hint={`失效占比 ≥ ${(draft.kvMergeThreshold * 100).toFixed(0)}% 触发`}>
+                <input
+                  type="range"
+                  min={0.1}
+                  max={1.1}
+                  step={0.05}
+                  value={draft.kvMergeThreshold}
+                  onChange={(e) => patch({ kvMergeThreshold: Number(e.target.value) })}
+                />
               </Field>
             </div>
           </>

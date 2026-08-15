@@ -15,8 +15,11 @@ export function QueryPanel() {
   const state = useLabState();
   const run = useSimStore((s) => s.run);
   const busy = useSimStore((s) => s.busy);
-  // LSM 存储层没有优化器也没有二级索引：提示与投影两个旋钮对它没有意义。
-  const hasPlanChoice = useCapability('btree');
+  // 只有存在索引可选的引擎才需要「索引提示」。
+  const hasIndexHint = useCapability('btree');
+  // 投影列对**所有**有查询路径的引擎都有意义，而且对列存最有意义 ——
+  // 那里它就是「列裁剪」本身：少选一列就少读一整块。
+  const hasColumnar = useCapability('columnar');
 
   const columns = state.schema?.columns ?? [];
   const numericColumns = columns.filter((c) => c.type !== 'varchar');
@@ -45,7 +48,16 @@ export function QueryPanel() {
   const sql = predicateToSql(predicate, state.schema?.name ?? 'users', projection);
 
   return (
-    <Panel title="查询" subtitle={hasPlanChoice ? '优化器会在全表扫描与索引之间选择' : '归并扫描 + 过滤（LSM 没有优化器）'}>
+    <Panel
+      title="查询"
+      subtitle={
+        hasIndexHint
+          ? '优化器会在全表扫描与索引之间选择'
+          : hasColumnar
+            ? '列裁剪 + 区间统计剪枝 + 向量化'
+            : '归并扫描 + 过滤（LSM 没有优化器）'
+      }
+    >
       <div className="flex flex-col gap-2">
         <div className="grid grid-cols-[1fr_1fr] gap-2">
           <Field label="条件">
@@ -94,35 +106,40 @@ export function QueryPanel() {
           </div>
         )}
 
-        {hasPlanChoice ? (
-        <div className="grid grid-cols-[1fr_1fr] gap-2">
-          <Field label="索引提示">
-            <select data-testid="q-hint" className="dbkl-input" value={hint} onChange={(e) => setHint(e.target.value)}>
-              <option value="auto">自动（按代价）</option>
-              <option value="none">强制全表扫描</option>
-              {indexes.map((ix) => (
-                <option key={ix.id} value={ix.id}>
-                  强制 {ix.name}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label="投影列" hint={covering ? '可能覆盖索引' : '需要整行'}>
+        <div className={`grid gap-2 ${hasIndexHint ? 'grid-cols-[1fr_1fr]' : 'grid-cols-1'}`}>
+          {hasIndexHint && (
+            <Field label="索引提示">
+              <select data-testid="q-hint" className="dbkl-input" value={hint} onChange={(e) => setHint(e.target.value)}>
+                <option value="auto">自动（按代价）</option>
+                <option value="none">强制全表扫描</option>
+                {indexes.map((ix) => (
+                  <option key={ix.id} value={ix.id}>
+                    强制 {ix.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
+          <Field
+            label="投影列"
+            hint={hasColumnar ? (covering ? '只读 2 列' : '要读全部列') : covering ? '可能覆盖索引' : '需要整行'}
+          >
             <select
               data-testid="q-projection"
               className="dbkl-input"
               value={covering ? 'covering' : 'all'}
               onChange={(e) => setCovering(e.target.value === 'covering')}
             >
-              <option value="all">SELECT *（要回表）</option>
-              <option value="covering">仅索引列 + 主键</option>
+              <option value="all">{hasColumnar ? 'SELECT *（读全部列块）' : 'SELECT *（要回表）'}</option>
+              <option value="covering">{hasColumnar ? '只取 2 列（列裁剪）' : '仅索引列 + 主键'}</option>
             </select>
           </Field>
         </div>
-        ) : (
+        {!hasIndexHint && (
           <p className="rounded-md border border-ink-700 bg-ink-850/60 px-2 py-1.5 text-[10.5px] leading-relaxed text-mute-400">
-            LSM 存储层只有一条路可走：把 MemTable 与所有 SST 归并成有序视图后逐行过滤。
-            没有二级索引，也就没有「优化器选哪条路」这回事。
+            {hasColumnar
+              ? '列存没有索引可选，但**选几列**直接决定读多少：少选一列就少读一整块列块，右侧面板会给出省了百分之多少。'
+              : 'LSM 存储层只有一条路可走：把 MemTable 与所有 SST 归并成有序视图后逐行过滤，没有「优化器选哪条路」这回事。'}
           </p>
         )}
 

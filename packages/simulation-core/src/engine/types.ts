@@ -13,7 +13,6 @@ export type EngineCapability =
   | 'secondary-index'
   | 'heap'
   | 'lsm'
-  | 'columnar'
   | 'buffer-pool'
   | 'mvcc'
   | 'vacuum'
@@ -21,7 +20,13 @@ export type EngineCapability =
   | 'compaction'
   | 'bloom-filter'
   | 'wal'
-  | 'raft';
+  | 'raft'
+  // Phase 3 续：列存与哈希索引 KV
+  | 'columnar'
+  | 'zone-map'
+  | 'vectorized'
+  | 'kv'
+  | 'hash-index';
 
 export interface EngineConfig {
   /** B+ 树阶数：内部页最多 order 个子指针，叶子页最多 order-1 条记录。 */
@@ -79,6 +84,26 @@ export interface EngineConfig {
   maxImmutableMemtables: number;
   /** L0 文件数达到它就写停顿（对应 RocksDB 的 level0_stop_writes_trigger）。 */
   l0StopTrigger: number;
+
+  // ——— Phase 3 续：列存 ———————————————————————————————
+
+  /** 一个行组（row group / 数据块）装多少行 —— 列存的最小 IO 与剪枝单位。 */
+  rowGroupSize: number;
+  /** 是否为每个列块记录 min/max 区间统计，用来整块跳过。 */
+  zoneMaps: boolean;
+  /** 向量化执行一批处理多少行。 */
+  vectorBatchSize: number;
+  /** 列编码策略：auto 会按列的基数自动在字典/RLE/原样之间选。 */
+  columnEncoding: 'auto' | 'plain' | 'dictionary' | 'rle';
+
+  // ——— Phase 3 续：哈希索引 KV ————————————————————————
+
+  /** 一个日志文件写满多少条就切下一个。 */
+  kvLogFileRecords: number;
+  /** 内存哈希表的桶数（决定冲突链长度）。 */
+  kvHashBuckets: number;
+  /** 失效数据占比超过它就触发合并（回收空间）。 */
+  kvMergeThreshold: number;
 }
 
 export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
@@ -104,6 +129,15 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   maxBackgroundJobs: 2,
   maxImmutableMemtables: 2,
   l0StopTrigger: 8,
+
+  rowGroupSize: 8,
+  zoneMaps: true,
+  vectorBatchSize: 4,
+  columnEncoding: 'auto',
+
+  kvLogFileRecords: 8,
+  kvHashBuckets: 16,
+  kvMergeThreshold: 0.4,
 };
 
 /** 用户级命令：worker 的输入单元，也是会话持久化的最小单位。 */

@@ -15,6 +15,8 @@ import { EventLogPanel } from '@/components/panels/EventLogPanel';
 import { TutorialPanel } from '@/components/panels/TutorialPanel';
 import { TransactionPanel } from '@/components/panels/TransactionPanel';
 import { LsmPanel } from '@/components/panels/LsmPanel';
+import { ColumnarPanel } from '@/components/panels/ColumnarPanel';
+import { KvPanel } from '@/components/panels/KvPanel';
 import { Timeline } from '@/components/timeline/Timeline';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { useCapability, usePlaybackDriver, useSimStore } from '@/state/store';
@@ -30,7 +32,11 @@ export function App() {
   const boot = useSimStore((s) => s.boot);
   const hasTransactions = useCapability('transactions');
   const hasLsm = useCapability('lsm');
+  const hasColumnar = useCapability('columnar');
+  const hasKv = useCapability('kv');
   const hasSecondaryIndex = useCapability('secondary-index');
+  // 哈希 KV 只有「按键点查」一条路，查询构造器对它没有意义。
+  const hasQuery = !hasKv;
   useKeyboardShortcuts();
   usePlaybackDriver();
 
@@ -46,7 +52,7 @@ export function App() {
           <EnginePanel />
           <OperationsPanel />
           {hasTransactions && <TransactionPanel />}
-          <QueryPanel />
+          {hasQuery && <QueryPanel />}
           {hasSecondaryIndex && <IndexPanel />}
           <ConfigPanel />
           <SchemaPanel />
@@ -60,6 +66,8 @@ export function App() {
 
         <aside className="flex w-[340px] shrink-0 flex-col overflow-y-auto border-l border-ink-700 bg-ink-900">
           {hasLsm && <LsmPanel />}
+          {hasColumnar && <ColumnarPanel />}
+          {hasKv && <KvPanel />}
           <PlanPanel />
           <InspectorPanel />
           <MetricsPanel />

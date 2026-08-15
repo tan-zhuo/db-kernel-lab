@@ -1,6 +1,8 @@
 import { BTreeEngine } from './btree-engine';
 import { PostgresHeapEngine } from './heap-engine';
 import { LsmEngine } from './lsm-engine';
+import { ColumnarEngine } from './columnar-engine';
+import { KvHashEngine } from './kv-engine';
 import type { EngineConfig, EngineFactory, StorageEngine } from './types';
 
 /**
@@ -33,6 +35,8 @@ export function createEngine(id: string, config: EngineConfig): StorageEngine {
 export const INNODB_BTREE_ENGINE_ID = 'innodb-btree';
 export const POSTGRES_HEAP_ENGINE_ID = 'postgres-heap';
 export const LSM_ENGINE_ID = 'lsm-tree';
+export const COLUMNAR_ENGINE_ID = 'columnar';
+export const KV_HASH_ENGINE_ID = 'kv-hash';
 
 /** 默认引擎：Phase 1 的 InnoDB 聚簇 B+ 树。 */
 export const DEFAULT_ENGINE_ID = INNODB_BTREE_ENGINE_ID;
@@ -59,4 +63,20 @@ registerEngine({
   description: '写入只追加进 MemTable，冻结后刷成 SST 并逐层压实；读要自上而下探测，靠布隆过滤器减少读放大',
   capabilities: ['lsm', 'compaction', 'bloom-filter', 'wal'],
   create: (config) => new LsmEngine(config),
+});
+
+registerEngine({
+  id: COLUMNAR_ENGINE_ID,
+  label: '列存 · ClickHouse 风格',
+  description: '数据按列存放：同列同质所以压得极狠，查询只读用到的那几列，区间统计还能整块跳过',
+  capabilities: ['columnar', 'zone-map', 'vectorized'],
+  create: (config) => new ColumnarEngine(config),
+});
+
+registerEngine({
+  id: KV_HASH_ENGINE_ID,
+  label: 'KV · 哈希索引（Bitcask）',
+  description: '全部键常驻内存哈希表：点查恒定一次磁盘读，但完全不支持范围扫描，规模被内存卡死',
+  capabilities: ['kv', 'hash-index', 'wal'],
+  create: (config) => new KvHashEngine(config),
 });

@@ -13,6 +13,8 @@ const ENGINE_PRESETS: Record<string, Partial<EngineConfig>> = {
   'innodb-btree': { order: 4, bufferPoolFrames: 8 },
   'postgres-heap': { order: 4, bufferPoolFrames: 10, heapTuplesPerPage: 4, hotUpdate: true },
   'lsm-tree': { memtableLimit: 6, l0CompactionTrigger: 3, levelFanout: 3, bloomBitsPerKey: 10 },
+  columnar: { rowGroupSize: 12, vectorBatchSize: 4, zoneMaps: true, columnEncoding: 'auto' },
+  'kv-hash': { kvLogFileRecords: 6, kvHashBuckets: 12, kvMergeThreshold: 0.4 },
 };
 
 /** 每个引擎最值得先看的一句话。 */
@@ -20,6 +22,8 @@ const ENGINE_HOOK: Record<string, string> = {
   'innodb-btree': '主键索引**就是**表：叶子页装着整行，二级索引要回表。',
   'postgres-heap': '表是一堆无序的页：索引只存 TID，取行必须再跳一次；更新写新版本，旧版本靠 VACUUM 回收。',
   'lsm-tree': '写只追加，从不原地改：装满就刷成文件、逐层压实；读要自上而下探测，靠布隆过滤器省 IO。',
+  columnar: '数据按列放：同列同质所以压得极狠，查询**只读用到的那几列**，区间统计还能整块跳过。',
+  'kv-hash': '全部键常驻内存哈希表：点查恒定一次磁盘读，但**完全不支持范围扫描**，规模被内存卡死。',
 };
 
 /**

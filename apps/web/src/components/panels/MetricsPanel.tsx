@@ -24,6 +24,8 @@ export function MetricsPanel() {
   const hasHeap = useCapability('heap');
   const hasLsm = useCapability('lsm');
   const hasBTree = useCapability('btree');
+  const hasColumnar = useCapability('columnar');
+  const hasKv = useCapability('kv');
 
   const m = state.metrics;
   const pages = Object.keys(state.pages).length;
@@ -41,6 +43,31 @@ export function MetricsPanel() {
       <div className="grid grid-cols-3 gap-1.5">
         <Stat label="行数" value={formatNumber(rows)} tone="accent" />
         {hasBTree && <Stat label="树高" value={clustered?.height ?? 0} hint="主键索引树高" />}
+        {hasColumnar && state.columnar && (
+          <>
+            <Stat label="行组" value={state.columnar.rowGroups.length} />
+            <Stat
+              label="压缩比"
+              value={
+                state.columnar.totalEncodedBytes === 0
+                  ? '—'
+                  : `${(state.columnar.totalRawBytes / state.columnar.totalEncodedBytes).toFixed(2)}×`
+              }
+              tone="good"
+            />
+          </>
+        )}
+        {hasKv && state.kv && (
+          <>
+            <Stat label="日志文件" value={state.kv.files.length} />
+            <Stat
+              label="索引内存"
+              value={formatNumber(state.kv.indexBytes)}
+              tone="warn"
+              hint="全部键常驻内存，这是哈希 KV 的规模上限"
+            />
+          </>
+        )}
         {hasBTree && <Stat label="页数" value={`${pages}`} hint={`叶子 ${leaves} / 其它 ${pages - leaves}`} />}
         {lsm && (
           <>

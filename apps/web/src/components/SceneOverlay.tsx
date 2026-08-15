@@ -34,6 +34,24 @@ const LSM_LEGEND: { color: string; label: string }[] = [
   { color: PALETTE.tombstone, label: '墓碑占比高' },
 ];
 
+const COLUMNAR_LEGEND: { color: string; label: string }[] = [
+  { color: PALETTE.chunkDelta, label: 'delta 编码（递增列）' },
+  { color: PALETTE.chunkDictionary, label: 'dictionary 编码（低基数）' },
+  { color: PALETTE.chunkRle, label: 'rle 编码（连续重复）' },
+  { color: PALETTE.chunkPlain, label: 'plain（压不动）' },
+  { color: PALETTE.chunkRead, label: '本次读了这一列' },
+  { color: PALETTE.chunkSkipped, label: '区间统计整块跳过' },
+];
+
+const KV_LEGEND: { color: string; label: string }[] = [
+  { color: PALETTE.kvBucketFilled, label: '哈希桶（高度=冲突链）' },
+  { color: PALETTE.kvBucketEmpty, label: '空桶' },
+  { color: PALETTE.kvRecordLive, label: '有效记录' },
+  { color: PALETTE.kvRecordDead, label: '已被覆盖的垃圾' },
+  { color: PALETTE.kvLogActive, label: '活动文件（可写）' },
+  { color: PALETTE.kvProbe, label: '本次探测' },
+];
+
 const SHORTCUTS = [
   ['空格', '播放 / 暂停'],
   ['← →', '单步'],
@@ -52,11 +70,21 @@ export function SceneOverlay() {
   const hasHeap = useCapability('heap');
   const hasLsm = useCapability('lsm');
   const hasBTree = useCapability('btree');
+  const hasColumnar = useCapability('columnar');
+  const hasKv = useCapability('kv');
   const activeCommand = state.activeCommand;
   const result = state.lastResult;
   const mv = state.mvcc;
 
-  const legend = hasLsm ? LSM_LEGEND : hasHeap ? [...HEAP_LEGEND, ...BTREE_LEGEND.slice(1, 3)] : BTREE_LEGEND;
+  const legend = hasColumnar
+    ? COLUMNAR_LEGEND
+    : hasKv
+      ? KV_LEGEND
+      : hasLsm
+        ? LSM_LEGEND
+        : hasHeap
+          ? [...HEAP_LEGEND, ...BTREE_LEGEND.slice(1, 3)]
+          : BTREE_LEGEND;
 
   return (
     <>
@@ -91,6 +119,18 @@ export function SceneOverlay() {
           {state.lsm && state.lsm.bgQueue.length > 0 && (
             <div className="num mt-1 text-[11px] text-orange-500">
               后台积压 {state.lsm.bgQueue.length} 个任务（刷写/压实都不在写路径上）
+            </div>
+          )}
+          {state.columnar?.lastScan && (
+            <div className="num mt-1 text-[11px] text-amber-500">
+              只读 {state.columnar.lastScan.columnsRead.length} 列 · 跳过{' '}
+              {state.columnar.lastScan.rowGroupsSkipped} 个行组 · {state.columnar.lastScan.bytesRead} B
+            </div>
+          )}
+          {state.kv?.lastProbe && (
+            <div className="num mt-1 text-[11px] text-amber-500">
+              桶 {state.kv.lastProbe.bucket} · 链上 {state.kv.lastProbe.chainSteps} 步 ·{' '}
+              {state.kv.lastProbe.found ? '一次磁盘读' : '没碰磁盘'}
             </div>
           )}
           {state.lsm?.lastStall && (

@@ -176,6 +176,7 @@ export const useSimStore = create<SimStore>()((set, get) => ({
           ? `已从 IndexedDB 恢复上次实验：${commands.length} 条命令 / ${history.length} 个事件`
           : '就绪：表 users 已创建，试试左侧的插入操作',
       });
+      setBootStep(`就绪 · ${history.length} 个事件已装载`);
       hideBootScreen();
     } catch (err) {
       setBootStep('初始化失败，请刷新重试');

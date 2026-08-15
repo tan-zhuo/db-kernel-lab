@@ -9,6 +9,8 @@ export * from './engine/bplus-tree';
 export * from './engine/btree-engine';
 export * from './engine/heap-engine';
 export * from './engine/lsm-engine';
+export * from './engine/columnar-engine';
+export * from './engine/kv-engine';
 export * from './engine/registry';
 export * from './query/types';
 export * from './query/planner';

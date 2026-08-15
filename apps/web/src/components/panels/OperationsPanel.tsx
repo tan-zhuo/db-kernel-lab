@@ -46,7 +46,12 @@ export function OperationsPanel() {
           <Field label="主键 key">
             <input className="dbkl-input" type="number" value={key} onChange={(e) => setKey(Number(e.target.value))} />
           </Field>
-          <button className="dbkl-btn dbkl-btn-primary" disabled={busy} onClick={() => exec({ kind: 'insert', key })}>
+          <button
+            className="dbkl-btn dbkl-btn-primary"
+            data-testid="op-insert"
+            disabled={busy}
+            onClick={() => exec({ kind: 'insert', key })}
+          >
             <Database size={13} /> 插入
           </button>
           <button
@@ -64,10 +69,10 @@ export function OperationsPanel() {
           >
             <Pencil size={13} /> 更新
           </button>
-          <button className="dbkl-btn" disabled={busy} onClick={() => exec({ kind: 'search', key })}>
+          <button className="dbkl-btn" data-testid="op-search" disabled={busy} onClick={() => exec({ kind: 'search', key })}>
             <Search size={13} /> 点查
           </button>
-          <button className="dbkl-btn" disabled={busy} onClick={() => exec({ kind: 'delete', key })}>
+          <button className="dbkl-btn" data-testid="op-delete" disabled={busy} onClick={() => exec({ kind: 'delete', key })}>
             <Trash2 size={13} /> 删除
           </button>
         </div>
@@ -106,13 +111,13 @@ export function OperationsPanel() {
           <Field label="to">
             <input className="dbkl-input" type="number" value={to} onChange={(e) => setTo(Number(e.target.value))} />
           </Field>
-          <button className="dbkl-btn" disabled={busy} onClick={() => exec({ kind: 'range_scan', from, to })}>
+          <button className="dbkl-btn" data-testid="op-range" disabled={busy} onClick={() => exec({ kind: 'range_scan', from, to })}>
             扫描
           </button>
         </div>
 
         <div className="flex flex-wrap gap-2">
-          <button className="dbkl-btn" disabled={busy} onClick={() => exec({ kind: 'full_scan' })}>
+          <button className="dbkl-btn" data-testid="op-full-scan" disabled={busy} onClick={() => exec({ kind: 'full_scan' })}>
             <Layers size={13} />
             {hasHeap ? '顺序扫描（Seq Scan）' : hasLsm ? '归并全表扫描' : '全索引扫描'}
           </button>

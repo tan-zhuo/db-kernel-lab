@@ -14,6 +14,8 @@ const CATEGORY_STYLE: Record<EventCategory, string> = {
   txn: 'text-accent-400',
   mvcc: 'text-violet-400',
   lsm: 'text-teal-500',
+  columnar: 'text-violet-400',
+  kv: 'text-teal-500',
 };
 
 /** 过滤按钮：只显示当前引擎真正会产生的分类（由 capabilities 决定）。 */
@@ -27,6 +29,8 @@ const FILTERS: { id: 'all' | EventCategory; label: string; capability?: string }
   { id: 'txn', label: '事务', capability: 'transactions' },
   { id: 'mvcc', label: 'MVCC', capability: 'mvcc' },
   { id: 'lsm', label: 'LSM', capability: 'lsm' },
+  { id: 'columnar', label: '列存', capability: 'columnar' },
+  { id: 'kv', label: 'KV', capability: 'kv' },
 ];
 
 /** 事件日志：游标附近的窗口，点击任意行即可把整个实验跳到那一刻。 */

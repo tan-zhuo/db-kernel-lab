@@ -353,6 +353,94 @@ export interface LsmState {
   entriesWritten: number;
 }
 
+// ——— Phase 3 续：列存 ————————————————————————————————————
+
+export interface ColumnChunkState {
+  column: string;
+  rows: number;
+  encoding: 'plain' | 'dictionary' | 'rle' | 'delta';
+  rawBytes: number;
+  encodedBytes: number;
+  distinct: number;
+  minValue: Key | null;
+  maxValue: Key | null;
+}
+
+/** 行组：列存的最小 IO 与剪枝单位。一个行组里每列各存一块。 */
+export interface RowGroupState {
+  id: string;
+  index: number;
+  rows: number;
+  capacity: number;
+  sealed: boolean;
+  chunks: Record<string, ColumnChunkState>;
+  rawBytes: number;
+  encodedBytes: number;
+  /** 最近一次查询里：被 zone map 整块跳过 / 真的读了哪些列。 */
+  skipped: boolean;
+  readColumns: string[];
+}
+
+export interface ColumnarState {
+  rowGroups: RowGroupState[];
+  columns: string[];
+  /**
+   * 最近一次查询的 IO 账单 —— 列存的卖点全在这几个数上。
+   *
+   * 注意「行存要读多少」不放在这里：它可以从 `rowGroups` 直接算出来
+   * （所有行组 × 所有列），存一份反而会有对不上的风险。
+   */
+  lastScan: {
+    columnsRead: string[];
+    rowGroupsScanned: number;
+    rowGroupsSkipped: number;
+    bytesRead: number;
+    rowsMatched: number;
+  } | null;
+  totalRawBytes: number;
+  totalEncodedBytes: number;
+}
+
+// ——— Phase 3 续：哈希索引 KV ——————————————————————————
+
+export interface LogFileState {
+  id: string;
+  index: number;
+  records: number;
+  bytes: number;
+  sealed: boolean;
+  /** 已经被新版本覆盖、等着合并回收的记录数。 */
+  deadRecords: number;
+}
+
+export interface HashEntryState {
+  key: Key;
+  bucket: number;
+  fileId: string;
+  offset: number;
+}
+
+export interface KvState {
+  files: LogFileState[];
+  /** 内存哈希索引：key → 记录位置。**常驻内存**，所以键数被内存卡死。 */
+  index: HashEntryState[];
+  buckets: number;
+  indexBytes: number;
+  /** 最近一次点查的探测轨迹。 */
+  lastProbe: {
+    key: Key;
+    bucket: number;
+    chainSteps: number;
+    found: boolean;
+    fileId: string | null;
+    offset: number;
+  } | null;
+  merges: number;
+  lastMerge: { liveRecords: number; deadRecords: number; reclaimedBytes: number } | null;
+  totalRecords: number;
+  deadRecords: number;
+}
+
 export interface OperatorStat {
   nodeId: string;
   op: string;
@@ -394,6 +482,10 @@ export interface LabState {
   mvcc: MvccState | null;
   /** LSM 引擎的 MemTable / SST 层级状态；其它引擎为 null。 */
   lsm: LsmState | null;
+  /** 列存引擎的行组 / 列块状态；其它引擎为 null。 */
+  columnar: ColumnarState | null;
+  /** 哈希索引 KV 引擎的日志文件与内存索引；其它引擎为 null。 */
+  kv: KvState | null;
   /** 最近一次结构性事件的序号，供可视化触发一次性动画。 */
   lastStructuralSeq: number;
   appliedSeq: number;
@@ -425,6 +517,8 @@ export function createInitialState(config: EngineConfig = DEFAULT_ENGINE_CONFIG)
     lookup: null,
     mvcc: null,
     lsm: null,
+    columnar: null,
+    kv: null,
     lastStructuralSeq: -1,
     appliedSeq: -1,
   };
@@ -528,6 +622,44 @@ function lsm(state: LabState): LsmState {
   return state.lsm;
 }
 
+function columnar(state: LabState): ColumnarState {
+  if (!state.columnar) {
+    state.columnar = {
+      rowGroups: [],
+      columns: [],
+      lastScan: null,
+      totalRawBytes: 0,
+      totalEncodedBytes: 0,
+    };
+  }
+  return state.columnar;
+}
+
+function kv(state: LabState): KvState {
+  if (!state.kv) {
+    state.kv = {
+      files: [],
+      index: [],
+      buckets: state.config.kvHashBuckets,
+      indexBytes: 0,
+      lastProbe: null,
+      merges: 0,
+      lastMerge: null,
+      totalRecords: 0,
+      deadRecords: 0,
+    };
+  }
+  return state.kv;
+}
+
+/** 列存的扫描账单是懒建的：查询一开始不知道会不会有事件，第一条相关事件到了才建。 */
+function ensureScan(c: ColumnarState): NonNullable<ColumnarState['lastScan']> {
+  if (!c.lastScan) {
+    c.lastScan = { columnsRead: [], rowGroupsScanned: 0, rowGroupsSkipped: 0, bytesRead: 0, rowsMatched: 0 };
+  }
+  return c.lastScan;
+}
+
 function heapOf(p: PageState): HeapPageState {
   if (!p.heap) p.heap = { blockNo: 0, tuples: [], freeSlots: 0, slots: 0, allVisible: false };
   return p.heap;
@@ -590,6 +722,14 @@ export function applyEvent(state: LabState, e: SimulationEvent): LabState {
       if (state.lsm) {
         state.lsm.probes = [];
       }
+      if (state.columnar) {
+        state.columnar.lastScan = null;
+        for (const rg of state.columnar.rowGroups) {
+          rg.skipped = false;
+          rg.readColumns = [];
+        }
+      }
+      if (state.kv) state.kv.lastProbe = null;
       if (e.kind === 'query') {
         state.plan = null;
         state.operators = {};
@@ -1310,6 +1450,165 @@ export function applyEvent(state: LabState, e: SimulationEvent): LabState {
       if (at >= 0) l.bgQueue.splice(at, 1);
       break;
     }
+    // ══ Phase 3 续：列存 ═══════════════════════════════════
+    case 'ROW_GROUP_OPEN': {
+      const c = columnar(state);
+      c.rowGroups.push({
+        id: e.rowGroupId,
+        index: e.index,
+        rows: 0,
+        capacity: e.capacity,
+        sealed: false,
+        chunks: {},
+        rawBytes: 0,
+        encodedBytes: 0,
+        skipped: false,
+        readColumns: [],
+      });
+      break;
+    }
+    case 'COLUMN_CHUNK_WRITE': {
+      const c = columnar(state);
+      const rg = c.rowGroups.find((g) => g.id === e.rowGroupId);
+      if (rg) {
+        rg.chunks[e.column] = {
+          column: e.column,
+          rows: e.rows,
+          encoding: e.encoding,
+          rawBytes: e.rawBytes,
+          encodedBytes: e.encodedBytes,
+          distinct: e.distinct,
+          minValue: e.minValue,
+          maxValue: e.maxValue,
+        };
+        rg.rows = Math.max(rg.rows, e.rows);
+      }
+      if (!c.columns.includes(e.column)) c.columns.push(e.column);
+      c.totalRawBytes += e.rawBytes;
+      c.totalEncodedBytes += e.encodedBytes;
+      break;
+    }
+    case 'ROW_GROUP_SEAL': {
+      const c = columnar(state);
+      const rg = c.rowGroups.find((g) => g.id === e.rowGroupId);
+      if (rg) {
+        rg.sealed = true;
+        rg.rows = e.rows;
+        rg.rawBytes = e.rawBytes;
+        rg.encodedBytes = e.encodedBytes;
+      }
+      state.recordCount = c.rowGroups.reduce((n, g) => n + g.rows, 0);
+      state.lastStructuralSeq = e.seq;
+      break;
+    }
+    case 'ZONE_MAP_SKIP': {
+      const c = columnar(state);
+      const rg = c.rowGroups.find((g) => g.id === e.rowGroupId);
+      if (rg) rg.skipped = true;
+      // 整片都被剪掉也是一次完整的扫描结果（而且是最漂亮的那种），账单必须建起来。
+      const scan = ensureScan(c);
+      scan.rowGroupsSkipped++;
+      break;
+    }
+    case 'COLUMN_READ': {
+      const c = columnar(state);
+      const rg = c.rowGroups.find((g) => g.id === e.rowGroupId);
+      if (rg && !rg.readColumns.includes(e.column)) rg.readColumns.push(e.column);
+      const scan = ensureScan(c);
+      if (!scan.columnsRead.includes(e.column)) scan.columnsRead.push(e.column);
+      scan.bytesRead += e.bytes;
+      // 每个行组第一次被读到时才算一次「扫描」
+      if (rg && rg.readColumns.length === 1) scan.rowGroupsScanned++;
+      m.logicalReads++;
+      break;
+    }
+    case 'VECTOR_BATCH': {
+      const c = columnar(state);
+      if (c.lastScan) {
+        c.lastScan.rowsMatched += e.matched;
+      }
+      m.scanRows += e.rows;
+      break;
+    }
+
+    // ══ Phase 3 续：哈希索引 KV ════════════════════════════
+    case 'LOG_FILE_OPEN': {
+      const k = kv(state);
+      k.files.push({ id: e.fileId, index: e.index, records: 0, bytes: 0, sealed: false, deadRecords: 0 });
+      break;
+    }
+    case 'LOG_FILE_SEAL': {
+      const k = kv(state);
+      const f = k.files.find((x) => x.id === e.fileId);
+      if (f) {
+        f.sealed = true;
+        f.records = e.records;
+        f.bytes = e.bytes;
+      }
+      state.lastStructuralSeq = e.seq;
+      break;
+    }
+    case 'LOG_APPEND': {
+      const k = kv(state);
+      const f = k.files.find((x) => x.id === e.fileId);
+      if (f) {
+        f.records++;
+        f.bytes += e.bytes;
+      }
+      k.totalRecords++;
+      state.focusKey = e.key;
+      if (e.tombstone) m.recordsDeleted++;
+      else m.recordsInserted++;
+      break;
+    }
+    case 'HASH_INDEX_SET': {
+      const k = kv(state);
+      const at = k.index.findIndex((x) => x.key === e.key);
+      if (e.removed) {
+        if (at >= 0) k.index.splice(at, 1);
+      } else {
+        const entry: HashEntryState = { key: e.key, bucket: e.bucket, fileId: e.fileId, offset: e.offset };
+        if (at >= 0) k.index[at] = entry;
+        else k.index.push(entry);
+      }
+      // 被覆盖/删除的旧记录立刻变成垃圾，等合并回收。
+      if (e.overwrite || e.removed) k.deadRecords++;
+      k.indexBytes = e.indexBytes;
+      state.recordCount = e.keys;
+      break;
+    }
+    case 'HASH_PROBE': {
+      const k = kv(state);
+      k.lastProbe = {
+        key: e.key,
+        bucket: e.bucket,
+        chainSteps: e.chainSteps,
+        found: e.found,
+        fileId: e.fileId,
+        offset: e.offset,
+      };
+      state.lastResult = { key: e.key, found: e.found, pageId: null, slot: -1 };
+      // 命中才需要真的读一次磁盘；不命中连碰都不碰。
+      if (e.found) m.logicalReads++;
+      break;
+    }
+    case 'MERGE_BEGIN':
+      break;
+    case 'MERGE_END': {
+      const k = kv(state);
+      k.merges++;
+      k.lastMerge = {
+        liveRecords: e.liveRecords,
+        deadRecords: e.deadRecords,
+        reclaimedBytes: e.reclaimedBytes,
+      };
+      k.deadRecords = Math.max(0, k.deadRecords - e.deadRecords);
+      k.files = k.files.filter((f) => !e.inputs.includes(f.id));
+      m.compactions++;
+      state.lastStructuralSeq = e.seq;
+      break;
+    }
+
     case 'WRITE_STALL': {
       const l = lsm(state);
       l.stalls++;
@@ -1526,6 +1825,57 @@ export interface StructuralSnapshot {
   bufferRecency: PageId[];
   /** LSM 引擎专用；其它引擎不设置该字段。 */
   lsm?: StructuralLsm;
+  /** 列存引擎专用。 */
+  columnar?: StructuralColumnar;
+  /** 哈希索引 KV 引擎专用。 */
+  kv?: StructuralKv;
+}
+
+/** 列存的结构投影：行组里每列存了哪些行、用了什么编码、区间统计是多少。 */
+export interface StructuralColumnar {
+  columns: string[];
+  rowGroups: {
+    id: string;
+    rows: number;
+    sealed: boolean;
+    chunks: { column: string; rows: number; encoding: string; distinct: number; minValue: Key | null; maxValue: Key | null }[];
+  }[];
+}
+
+/** KV 的结构投影：日志文件 + 内存索引指向。 */
+export interface StructuralKv {
+  files: { id: string; records: number; sealed: boolean }[];
+  index: { key: Key; fileId: string; offset: number }[];
+}
+
+export function projectColumnar(c: ColumnarState): StructuralColumnar {
+  return {
+    columns: [...c.columns],
+    rowGroups: c.rowGroups.map((g) => ({
+      id: g.id,
+      rows: g.rows,
+      sealed: g.sealed,
+      chunks: Object.values(g.chunks)
+        .map((ch) => ({
+          column: ch.column,
+          rows: ch.rows,
+          encoding: ch.encoding as string,
+          distinct: ch.distinct,
+          minValue: ch.minValue,
+          maxValue: ch.maxValue,
+        }))
+        .sort((a, b) => a.column.localeCompare(b.column)),
+    })),
+  };
+}
+
+export function projectKv(k: KvState): StructuralKv {
+  return {
+    files: k.files.map((f) => ({ id: f.id, records: f.records, sealed: f.sealed })),
+    index: [...k.index]
+      .sort((a, b) => a.key - b.key)
+      .map((e) => ({ key: e.key, fileId: e.fileId, offset: e.offset })),
+  };
 }
 
 /** 把 LabState 里的 LSM 子状态投影成可与引擎快照比较的形状。 */
@@ -1598,6 +1948,8 @@ export function projectStructure(state: LabState): StructuralSnapshot {
     bufferFrames: state.buffer.frames.slice(),
     bufferRecency: state.buffer.recency.slice(),
     lsm: state.lsm ? projectLsm(state.lsm) : undefined,
+    columnar: state.columnar ? projectColumnar(state.columnar) : undefined,
+    kv: state.kv ? projectKv(state.kv) : undefined,
   };
 }
 
@@ -1707,6 +2059,29 @@ export function tupleVersionsOf(state: LabState, key: Key): { tid: Tid; tuple: H
     });
   }
   return out;
+}
+
+// ——— 列存派生量 ————————————————————————————————————————
+
+/**
+ * 同样一条查询，**行存**要读的字节数：所有行组 × 所有列。
+ *
+ * 行存没法只读某几列 —— 一行的各列物理上挨在一起，读一列就等于把整行拖进来。
+ * 这个数就是列存那句「省了百分之多少」的分母。
+ */
+export function bytesIfRowStore(c: ColumnarState): number {
+  let total = 0;
+  for (const group of c.rowGroups) {
+    for (const chunk of Object.values(group.chunks)) total += chunk.encodedBytes;
+  }
+  return total;
+}
+
+/** 本次查询相对行存省掉的 IO 比例（0..1）；没扫描过返回 NaN。 */
+export function columnarIoSaved(c: ColumnarState): number {
+  const baseline = bytesIfRowStore(c);
+  if (!c.lastScan || baseline === 0) return Number.NaN;
+  return 1 - c.lastScan.bytesRead / baseline;
 }
 
 // ——— LSM 派生量 ————————————————————————————————————————

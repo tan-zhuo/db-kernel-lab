@@ -374,6 +374,94 @@ export type SimulationEventBody =
       /** 实际读过的 SST 数（读放大）与被布隆过滤器挡掉的数量。 */
       probes: number;
       bloomSkips: number;
+    }
+
+  // ══ Phase 3 续：列存 ═══════════════════════════════════════
+  | { type: 'ROW_GROUP_OPEN'; rowGroupId: string; index: number; capacity: number }
+  /**
+   * 一个列块落盘。
+   *
+   * 列存的全部价值都压在这条事件里：**同一列的值挨在一起**，
+   * 所以能挑到合适的编码（基数低用字典、连续重复用 RLE），压缩比远高于行存；
+   * 而且读的时候可以只读这一块，完全不碰其它列。
+   */
+  | {
+      type: 'COLUMN_CHUNK_WRITE';
+      rowGroupId: string;
+      column: string;
+      rows: number;
+      encoding: 'plain' | 'dictionary' | 'rle' | 'delta';
+      /** 未编码的原始字节 vs 编码后的字节，两者之比即压缩比。 */
+      rawBytes: number;
+      encodedBytes: number;
+      distinct: number;
+      minValue: Key | null;
+      maxValue: Key | null;
+    }
+  | { type: 'ROW_GROUP_SEAL'; rowGroupId: string; rows: number; rawBytes: number; encodedBytes: number }
+  /** 区间统计（zone map）判定整个行组不可能有匹配行，直接跳过 —— 一个字节都不用读。 */
+  | {
+      type: 'ZONE_MAP_SKIP';
+      rowGroupId: string;
+      column: string;
+      minValue: Key | null;
+      maxValue: Key | null;
+      reason: string;
+    }
+  /** 真的读了某个列块。查询用到几列就只读几列，这是列存与行存最大的差别。 */
+  | { type: 'COLUMN_READ'; rowGroupId: string; column: string; rows: number; bytes: number }
+  /** 向量化执行：一次处理一批行而不是一行一行。 */
+  | { type: 'VECTOR_BATCH'; rowGroupId: string; rows: number; matched: number }
+
+  // ══ Phase 3 续：哈希索引 KV（Bitcask 风格）══════════════════
+  | { type: 'LOG_FILE_OPEN'; fileId: string; index: number }
+  | { type: 'LOG_FILE_SEAL'; fileId: string; records: number; bytes: number }
+  /** 追加写日志：KV 的写入永远是顺序追加，没有原地修改。 */
+  | {
+      type: 'LOG_APPEND';
+      fileId: string;
+      offset: number;
+      key: Key;
+      bytes: number;
+      tombstone: boolean;
+    }
+  /**
+   * 内存哈希索引项更新：key → (文件, 偏移)。
+   *
+   * 索引**常驻内存**，所以点查只要一次磁盘寻址；代价是键的数量被内存卡死 ——
+   * 这正是 Bitcask 这类设计的根本约束。
+   */
+  | {
+      type: 'HASH_INDEX_SET';
+      key: Key;
+      bucket: number;
+      fileId: string;
+      offset: number;
+      /** 覆盖旧值时为 true，旧记录随即变成垃圾。 */
+      overwrite: boolean;
+      /** 删除时把索引项摘掉。 */
+      removed: boolean;
+      keys: number;
+      indexBytes: number;
+    }
+  /** 哈希探测：桶内冲突链走了几步。与数据量无关，永远 O(1)。 */
+  | {
+      type: 'HASH_PROBE';
+      key: Key;
+      bucket: number;
+      chainSteps: number;
+      found: boolean;
+      fileId: string | null;
+      offset: number;
+    }
+  | { type: 'MERGE_BEGIN'; inputs: string[]; reason: string; deadRatio: number }
+  | {
+      type: 'MERGE_END';
+      inputs: string[];
+      outputs: string[];
+      liveRecords: number;
+      deadRecords: number;
+      reclaimedBytes: number;
     };
 
 export type SimulationEvent = EventMeta & SimulationEventBody;
@@ -454,6 +542,21 @@ export const EVENT_CATEGORY: Record<SimulationEventType, EventCategory> = {
   BLOOM_PROBE: 'access',
   SST_PROBE: 'access',
   LSM_GET_RESULT: 'access',
+
+  ROW_GROUP_OPEN: 'columnar',
+  COLUMN_CHUNK_WRITE: 'columnar',
+  ROW_GROUP_SEAL: 'columnar',
+  ZONE_MAP_SKIP: 'access',
+  COLUMN_READ: 'access',
+  VECTOR_BATCH: 'access',
+
+  LOG_FILE_OPEN: 'kv',
+  LOG_FILE_SEAL: 'kv',
+  LOG_APPEND: 'record',
+  HASH_INDEX_SET: 'kv',
+  HASH_PROBE: 'access',
+  MERGE_BEGIN: 'kv',
+  MERGE_END: 'kv',
 };
 
 export type EventCategory =
@@ -466,7 +569,9 @@ export type EventCategory =
   | 'plan'
   | 'txn'
   | 'mvcc'
-  | 'lsm';
+  | 'lsm'
+  | 'columnar'
+  | 'kv';
 
 /**
  * 每类事件占用的「逻辑时长」（毫秒）。
@@ -548,6 +653,21 @@ export const EVENT_DURATION: Record<SimulationEventType, number> = {
   BLOOM_PROBE: 110,
   SST_PROBE: 170,
   LSM_GET_RESULT: 280,
+
+  ROW_GROUP_OPEN: 180,
+  COLUMN_CHUNK_WRITE: 260,
+  ROW_GROUP_SEAL: 380,
+  ZONE_MAP_SKIP: 220,
+  COLUMN_READ: 240,
+  VECTOR_BATCH: 150,
+
+  LOG_FILE_OPEN: 180,
+  LOG_FILE_SEAL: 260,
+  LOG_APPEND: 130,
+  HASH_INDEX_SET: 120,
+  HASH_PROBE: 200,
+  MERGE_BEGIN: 420,
+  MERGE_END: 520,
 };
 
 /** 时间轴上值得停留的「关键帧」——单步/自动播放会在这些事件上放慢。 */
@@ -574,6 +694,10 @@ export const KEYFRAME_EVENTS: ReadonlySet<SimulationEventType> = new Set<Simulat
   'CRASH',
   'RECOVER_END',
   'WAL_TRUNCATE',
+  'ROW_GROUP_SEAL',
+  'ZONE_MAP_SKIP',
+  'MERGE_END',
+  'LOG_FILE_SEAL',
 ]);
 
 /** 人类可读的一行事件描述，供事件日志与时间轴 tooltip 使用。 */
@@ -737,6 +861,40 @@ export function describeEvent(e: SimulationEvent): string {
       return `LSM 读取 key=${e.key} → ${
         e.found ? `命中于 ${e.source === 'sst' ? e.sstId : e.source}` : '不存在'
       }（读 ${e.probes} 个 SST，布隆跳过 ${e.bloomSkips} 个）`;
+
+    case 'ROW_GROUP_OPEN':
+      return `打开行组 ${e.rowGroupId}（第 ${e.index} 个，容量 ${e.capacity} 行）`;
+    case 'COLUMN_CHUNK_WRITE':
+      return `列块 ${e.rowGroupId}.${e.column}：${e.rows} 行 · ${e.encoding} 编码 · ${e.rawBytes}→${e.encodedBytes} B（${(
+        e.rawBytes / Math.max(1, e.encodedBytes)
+      ).toFixed(1)}×）· ${e.distinct} 个不同值`;
+    case 'ROW_GROUP_SEAL':
+      return `行组 ${e.rowGroupId} 封口：${e.rows} 行，${e.rawBytes}→${e.encodedBytes} B`;
+    case 'ZONE_MAP_SKIP':
+      return `跳过行组 ${e.rowGroupId}：${e.column} ∈ [${e.minValue}, ${e.maxValue}]，${e.reason} —— 一个字节都不用读`;
+    case 'COLUMN_READ':
+      return `读列块 ${e.rowGroupId}.${e.column}：${e.rows} 行 / ${e.bytes} B`;
+    case 'VECTOR_BATCH':
+      return `向量化批次 ${e.rowGroupId}：${e.rows} 行 → 命中 ${e.matched}`;
+
+    case 'LOG_FILE_OPEN':
+      return `新建日志文件 ${e.fileId}（第 ${e.index} 个）`;
+    case 'LOG_FILE_SEAL':
+      return `日志文件 ${e.fileId} 写满封口（${e.records} 条 / ${e.bytes} B）`;
+    case 'LOG_APPEND':
+      return `追加写 ${e.fileId}@${e.offset}：key=${e.key}${e.tombstone ? '（墓碑）' : ''}，${e.bytes} B`;
+    case 'HASH_INDEX_SET':
+      return e.removed
+        ? `内存索引摘除 key=${e.key}（桶 ${e.bucket}）—— 现有 ${e.keys} 个键 / ${e.indexBytes} B`
+        : `内存索引 key=${e.key} → ${e.fileId}@${e.offset}（桶 ${e.bucket}${e.overwrite ? '，覆盖旧值' : ''}）—— 现有 ${e.keys} 个键 / ${e.indexBytes} B`;
+    case 'HASH_PROBE':
+      return `哈希探测 key=${e.key} → 桶 ${e.bucket}，链上走 ${e.chainSteps} 步 → ${
+        e.found ? `${e.fileId}@${e.offset}（一次磁盘读）` : '不存在（不用碰磁盘）'
+      }`;
+    case 'MERGE_BEGIN':
+      return `合并开始：${e.inputs.length} 个文件，失效占比 ${(e.deadRatio * 100).toFixed(0)}% —— ${e.reason}`;
+    case 'MERGE_END':
+      return `合并结束：保留 ${e.liveRecords} 条、丢弃 ${e.deadRecords} 条，回收 ${e.reclaimedBytes} B（${e.inputs.length} → ${e.outputs.length} 个文件）`;
     default: {
       const never: never = e;
       return JSON.stringify(never);

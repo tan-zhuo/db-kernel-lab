@@ -3,7 +3,9 @@ import { GraduationCap } from 'lucide-react';
 import {
   DEFAULT_ENGINE_CONFIG,
   DEFAULT_SCHEMA,
+  COLUMNAR_ENGINE_ID,
   INNODB_BTREE_ENGINE_ID,
+  KV_HASH_ENGINE_ID,
   LSM_ENGINE_ID,
   POSTGRES_HEAP_ENGINE_ID,
   PRIMARY_INDEX_ID,
@@ -399,6 +401,133 @@ const SCENARIOS: Scenario[] = [
     commands: [
       { kind: 'bulk_insert', count: 24, pattern: 'sequential', start: 1 },
       { kind: 'range_scan', from: 5, to: 15 },
+    ],
+  },
+
+  // ══ 列存 ═══════════════════════════════════════════════════
+  {
+    id: 'col-transpose',
+    engineId: COLUMNAR_ENGINE_ID,
+    title: '① 行 → 列的转置',
+    goal:
+      '写 12 行、每 6 行一组：落盘时同一列的值被拧到一起成为「列块」。' +
+      '场景里横轴是列、纵深是行组，砖块越高说明这一列压得越狠。',
+    config: { rowGroupSize: 6, vectorBatchSize: 3, zoneMaps: true },
+    commands: [{ kind: 'bulk_insert', count: 18, pattern: 'sequential', start: 1 }],
+  },
+  {
+    id: 'col-encoding',
+    engineId: COLUMNAR_ENGINE_ID,
+    title: '② 每列各挑各的编码',
+    goal:
+      '看事件日志里每个列块选了什么：自增的 id 走 delta，只有 6 个取值的 city 走字典/RLE，' +
+      '散乱的 score 压不动只能 plain。**同列同质**正是列存压缩比高的全部原因。',
+    config: { rowGroupSize: 12, columnEncoding: 'auto' },
+    commands: [{ kind: 'bulk_insert', count: 24, pattern: 'sequential', start: 1 }],
+  },
+  {
+    id: 'col-projection',
+    engineId: COLUMNAR_ENGINE_ID,
+    title: '③ 只读用到的那几列',
+    goal:
+      '同一份数据查两次：先 SELECT *（整片亮起来），再只取 id 一列（只有一条竖列亮）。' +
+      '面板底部的「列存读 / 行存要读」直接给出省了百分之多少 —— 这就是列存的全部卖点。',
+    config: { rowGroupSize: 12, zoneMaps: true },
+    commands: [
+      { kind: 'bulk_insert', count: 36, pattern: 'sequential', start: 1 },
+      { kind: 'query', predicate: { kind: 'all' }, columns: '*' },
+      { kind: 'query', predicate: { kind: 'all' }, columns: ['id'] },
+    ],
+  },
+  {
+    id: 'col-zonemap',
+    engineId: COLUMNAR_ENGINE_ID,
+    title: '④ 区间统计整块跳过',
+    goal:
+      '查 id ∈ [1,3]：每个列块都记着 min/max，只有第一个行组可能有匹配行，' +
+      '其余整片塌下去变灰 —— 一个字节都没读。到参数面板关掉「区间统计剪枝」再跑一次对比。',
+    config: { rowGroupSize: 4, zoneMaps: true },
+    commands: [
+      { kind: 'bulk_insert', count: 24, pattern: 'sequential', start: 1 },
+      { kind: 'range_scan', from: 1, to: 3 },
+    ],
+  },
+  {
+    id: 'col-point-cost',
+    engineId: COLUMNAR_ENGINE_ID,
+    title: '⑤ 列存的短板：点查一行',
+    goal:
+      '点查一个键：列存没有主键索引，只能靠区间统计缩小范围再逐列解码。' +
+      '把它和 InnoDB 的 ① 并排看 —— 那边一次树下降就拿到整行，这边要把每一列都翻一遍。',
+    config: { rowGroupSize: 4, zoneMaps: true },
+    commands: [
+      { kind: 'bulk_insert', count: 24, pattern: 'sequential', start: 1 },
+      { kind: 'search', key: 17 },
+    ],
+  },
+
+  // ══ 哈希索引 KV ════════════════════════════════════════════
+  {
+    id: 'kv-append',
+    engineId: KV_HASH_ENGINE_ID,
+    title: '① 追加写 + 内存索引',
+    goal:
+      '写 10 条：每条都是「追加到活动文件末尾 + 改内存索引指向」。' +
+      '上排是哈希桶（高度=冲突链），下面是日志文件。文件写满就封口，之后只读不写。',
+    config: { kvLogFileRecords: 4, kvHashBuckets: 12 },
+    commands: [{ kind: 'bulk_insert', count: 10, pattern: 'sequential', start: 1 }],
+  },
+  {
+    id: 'kv-point-get',
+    engineId: KV_HASH_ENGINE_ID,
+    title: '② 点查：哈希一次 + 一次磁盘读',
+    goal:
+      '查一个存在的键与一个不存在的键：命中时黄线从桶直落到记录，全程就这一跳；' +
+      '不存在时**连磁盘都不碰**。这个延迟与数据量完全无关 —— 哈希 KV 唯一但极强的卖点。',
+    config: { kvLogFileRecords: 4, kvHashBuckets: 12 },
+    commands: [
+      { kind: 'bulk_insert', count: 16, pattern: 'sequential', start: 1 },
+      { kind: 'search', key: 7 },
+      { kind: 'search', key: 999 },
+    ],
+  },
+  {
+    id: 'kv-no-range',
+    engineId: KV_HASH_ENGINE_ID,
+    title: '③ 范围扫描：做不到',
+    goal:
+      '试着扫 [1,5]：直接报错。哈希把键打散了，相邻的键落在完全不同的桶与文件里。' +
+      '**这就是两类 KV 的分水岭** —— 要范围扫描就只能用有序结构（B+ 树或 LSM）。',
+    config: { kvLogFileRecords: 4, kvHashBuckets: 12 },
+    commands: [
+      { kind: 'bulk_insert', count: 12, pattern: 'sequential', start: 1 },
+      { kind: 'range_scan', from: 1, to: 5 },
+    ],
+  },
+  {
+    id: 'kv-garbage',
+    engineId: KV_HASH_ENGINE_ID,
+    title: '④ 覆盖写产生的垃圾与合并',
+    goal:
+      '把同 8 个键反复覆盖 4 轮：旧记录还躺在文件里变成暗红色垃圾，垃圾占比冲高后自动触发合并 ——' +
+      '把还有效的记录搬进新文件、旧文件整体丢弃，索引同步改指向。',
+    config: { kvLogFileRecords: 4, kvHashBuckets: 12, kvMergeThreshold: 0.4 },
+    commands: [
+      { kind: 'bulk_insert', count: 8, pattern: 'sequential', start: 1 },
+      ...Array.from({ length: 32 }, (_, i) => ({ kind: 'insert', key: (i % 8) + 1 }) as Command),
+    ],
+  },
+  {
+    id: 'kv-collision',
+    engineId: KV_HASH_ENGINE_ID,
+    title: '⑤ 桶配少了会怎样',
+    goal:
+      '只给 3 个桶再写 30 个键：某几根桶明显长高，点查要在链上多走几步。' +
+      '注意它**仍然与数据量无关** —— 变长的是链，不是查找复杂度的量级。',
+    config: { kvHashBuckets: 3, kvLogFileRecords: 8 },
+    commands: [
+      { kind: 'bulk_insert', count: 30, pattern: 'sequential', start: 1 },
+      { kind: 'search', key: 21 },
     ],
   },
 ];

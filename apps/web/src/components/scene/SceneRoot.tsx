@@ -2,12 +2,14 @@ import { useEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { Grid, OrbitControls } from '@react-three/drei';
-import { PALETTE, layoutHeap, layoutLsm, layoutTree, type TreeLayout } from '@dbkl/visualization';
+import { PALETTE, layoutColumnar, layoutHeap, layoutKv, layoutLsm, layoutTree, type TreeLayout } from '@dbkl/visualization';
 import { useCapability, useLabState, useSimStore, useThemeVersion } from '@/state/store';
 import { BTreeView } from './BTreeView';
 import { BufferPoolView, bufferPoolExtent } from './BufferPoolView';
 import { HeapView } from './HeapView';
 import { LsmView } from './LsmView';
+import { ColumnarView } from './ColumnarView';
+import { KvView } from './KvView';
 
 /** 供「导出截图」使用的渲染器引用（在 Canvas 内部登记）。 */
 let glRef: THREE.WebGLRenderer | null = null;
@@ -61,6 +63,8 @@ export function SceneRoot() {
  *  - `btree` → B+ 树森林（InnoDB 的聚簇/二级索引，PostgreSQL 的索引）
  *  - `heap`  → 树下方的堆文件 + 版本链 + 索引→堆的弧线
  *  - `lsm`   → MemTable + 分层 SST（此时没有树，独占整个视口）
+ *  - `columnar` → 列 × 行组的矩阵
+ *  - `kv`    → 上层内存哈希桶 + 下层追加写日志文件
  *  - `buffer-pool` → 右侧的缓冲池货架
  *
  * 第三方引擎只要声明同样的能力，就能直接复用这些视图。
@@ -72,6 +76,8 @@ function SceneContent() {
   const hasBTree = useCapability('btree');
   const hasHeap = useCapability('heap');
   const hasLsm = useCapability('lsm');
+  const hasColumnar = useCapability('columnar');
+  const hasKv = useCapability('kv');
   const hasBufferPool = useCapability('buffer-pool');
 
   // 布局只算一次，B+ 树视图、堆视图与缓冲池视图共用。
@@ -100,6 +106,14 @@ function SceneContent() {
         maxY: lsm.bounds.maxY + 2.5,
       };
     }
+    if (hasColumnar && state.columnar) {
+      const c = layoutColumnar(state.columnar);
+      return { minX: c.bounds.minX, maxX: c.bounds.maxX, minY: c.bounds.minY, maxY: c.bounds.maxY };
+    }
+    if (hasKv && state.kv) {
+      const k = layoutKv(state.kv);
+      return { minX: k.bounds.minX, maxX: k.bounds.maxX, minY: k.bounds.minY, maxY: k.bounds.maxY };
+    }
     if (!showBufferPool || !hasBufferPool) return b;
     const bp = bufferPoolExtent(layout, state.buffer.frames.length);
     return {
@@ -109,7 +123,7 @@ function SceneContent() {
       maxY: Math.max(b.maxY, bp.maxY),
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layout, showBufferPool, hasBufferPool, hasHeap, hasLsm, state, state.buffer.frames.length]);
+  }, [layout, showBufferPool, hasBufferPool, hasHeap, hasLsm, hasColumnar, hasKv, state, state.buffer.frames.length]);
 
   // 雾必须跟着场景尺度走：索引变多之后树会横向铺开很远，
   // 固定的雾距会把整个森林都吃掉（画面全黑）。
@@ -121,6 +135,8 @@ function SceneContent() {
       {hasBTree && <BTreeView layout={layout} />}
       {hasHeap && <HeapView treeLayout={layout} />}
       {hasLsm && <LsmView />}
+      {hasColumnar && <ColumnarView />}
+      {hasKv && <KvView />}
       {hasBufferPool && showBufferPool && <BufferPoolView layout={layout} />}
       <CameraRig layout={layout} bounds={bounds} />
     </>

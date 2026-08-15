@@ -90,6 +90,29 @@ export interface PaletteShape {
   tombstone: string;
   /** 布隆过滤器成功挡掉一个文件。 */
   bloomSkip: string;
+
+  // —— 列存 ——
+  /** 列块底色按**编码方式**区分，一眼看出哪一列压得动。 */
+  chunkPlain: string;
+  chunkDictionary: string;
+  chunkRle: string;
+  chunkDelta: string;
+  /** 被区间统计整块跳过的行组（一个字节都没读）。 */
+  chunkSkipped: string;
+  /** 本次查询真的读了的列块。 */
+  chunkRead: string;
+
+  // —— 哈希索引 KV ——
+  kvBucketEmpty: string;
+  kvBucketFilled: string;
+  /** 正在写的活动文件 vs 已封口的只读文件。 */
+  kvLogActive: string;
+  kvLogSealed: string;
+  /** 仍被索引指着的记录 vs 已成垃圾的记录。 */
+  kvRecordLive: string;
+  kvRecordDead: string;
+  /** 哈希探测连线：桶 → 记录位置。 */
+  kvProbe: string;
 }
 
 export type ThemeId = 'deep' | 'slate' | 'warm' | 'light';
@@ -153,6 +176,21 @@ const DEEP: PaletteShape = {
   compacting: '#db6d28',
   tombstone: '#f85149',
   bloomSkip: '#39d353',
+
+  chunkPlain: '#4a5568',
+  chunkDictionary: '#7c5cff',
+  chunkRle: '#00b8a3',
+  chunkDelta: '#2f81f7',
+  chunkSkipped: '#232a38',
+  chunkRead: '#f0d264',
+
+  kvBucketEmpty: '#1a2233',
+  kvBucketFilled: '#2f81f7',
+  kvLogActive: '#00b8a3',
+  kvLogSealed: '#4a5568',
+  kvRecordLive: '#2ea043',
+  kvRecordDead: '#5c3a38',
+  kvProbe: '#f0d264',
 };
 
 /**
@@ -190,6 +228,17 @@ const SLATE: PaletteShape = {
   tupleUnused: '#2b3648',
   memtableShell: '#243449',
   sstLevel: ['#3b82f6', '#8b6cff', '#b088ff', '#d09bff', '#8593ab'],
+
+  chunkPlain: '#5a677d',
+  chunkDictionary: '#8b6cff',
+  chunkRle: '#14b8a6',
+  chunkDelta: '#3b82f6',
+  chunkSkipped: '#2b3243',
+  kvBucketEmpty: '#2b3648',
+  kvBucketFilled: '#3b82f6',
+  kvLogSealed: '#5a677d',
+  kvLogActive: '#14b8a6',
+  kvRecordDead: '#6b4442',
 };
 
 /**
@@ -253,6 +302,20 @@ const WARM: PaletteShape = {
   compacting: '#e07f3a',
   tombstone: '#e8624f',
   bloomSkip: '#5cc76b',
+
+  chunkPlain: '#5c5348',
+  chunkDictionary: '#a274e8',
+  chunkRle: '#1fae94',
+  chunkDelta: '#3f83d8',
+  chunkSkipped: '#2b2721',
+  chunkRead: '#f5d778',
+  kvBucketEmpty: '#2e2924',
+  kvBucketFilled: '#3f83d8',
+  kvLogActive: '#1fae94',
+  kvLogSealed: '#5c5348',
+  kvRecordLive: '#4fa85c',
+  kvRecordDead: '#6b4038',
+  kvProbe: '#f5d778',
 };
 
 /**
@@ -319,6 +382,20 @@ const LIGHT: PaletteShape = {
   compacting: '#c2410c',
   tombstone: '#b91c1c',
   bloomSkip: '#15803d',
+
+  chunkPlain: '#94a3b8',
+  chunkDictionary: '#6d28d9',
+  chunkRle: '#0f766e',
+  chunkDelta: '#1d4ed8',
+  chunkSkipped: '#dbe1ea',
+  chunkRead: '#b45309',
+  kvBucketEmpty: '#cbd3e0',
+  kvBucketFilled: '#1d4ed8',
+  kvLogActive: '#0f766e',
+  kvLogSealed: '#94a3b8',
+  kvRecordLive: '#15803d',
+  kvRecordDead: '#c26a63',
+  kvProbe: '#b45309',
 };
 
 export const THEMES: Record<ThemeId, PaletteShape> = {
@@ -479,6 +556,20 @@ export const HIGHLIGHT_DECAY_MS: Record<HighlightKind, number> = {
   fetch: 1800,
   compact: 2400,
 };
+
+/** 列块编码 → 颜色。同样必须是函数（PALETTE 会被就地覆盖）。 */
+export function encodingColor(encoding: string): string {
+  switch (encoding) {
+    case 'dictionary':
+      return PALETTE.chunkDictionary;
+    case 'rle':
+      return PALETTE.chunkRle;
+    case 'delta':
+      return PALETTE.chunkDelta;
+    default:
+      return PALETTE.chunkPlain;
+  }
+}
 
 /** 第 n 层 SST 的颜色（超出预设长度则复用最后一个）。 */
 export function levelColor(level: number): string {
